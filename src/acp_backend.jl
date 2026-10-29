@@ -1,7 +1,7 @@
 # ── ACPClientBackend ──────────────────────────────────────────────────────────
 # Drives any agent that speaks the Agent Client Protocol over stdio. `ACP_AGENTS` is the
 # registered set, and adding one is its argv plus a measurement of what it enforces for itself
-# (see `_acp_enforcement_gap`). Codex and Copilot speak ACP and are not registered.
+# (see `_acp_enforcement_gap`). Copilot is not registered.
 #
 # The shape differs from ClaudeBackend in one way that matters. Claude's
 # stream-JSON is a one-way firehose: we write turns and read events. ACP is
@@ -34,6 +34,7 @@ const ACP_AGENTS = Dict{String,Vector{String}}(
     "opencode" => ["opencode", "acp"],
     "gemini"   => ["gemini", "--experimental-acp"],
     "claude"   => ["claude-agent-acp"],
+    "codex"    => ["codex-acp"],
 )
 
 "Split \"acp:opencode:opencode/minimax-m3\" into its argv and model."
@@ -1109,7 +1110,9 @@ end
 # `current_mode_update` is NOT ignored: it is how an agent reports it changed its own mode, and
 # `permission_mode` (notably "plan") is enforced by the agent rather than by us. Silently dropping
 # it meant plan mode could lapse with nothing anywhere saying so. Handled below.
-const ACP_IGNORED_UPDATES = ("available_commands_update", "usage_update")
+# Codex sends session_info_update for its title and active/idle thread status.
+# Neither has an AgentEvent counterpart; a normal turn must not report them as errors.
+const ACP_IGNORED_UPDATES = ("available_commands_update", "usage_update", "session_info_update")
 
 function _map_acp_update(upd)::Vector{ACP.AgentEvent}
     upd isa AbstractDict || return ACP.AgentEvent[]

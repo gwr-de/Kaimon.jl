@@ -13,6 +13,9 @@ const ACP = Kaimon.ACP
     @test _parse_acp_model("acp:opencode:opencode/minimax-m3") ==
           (["opencode", "acp"], "opencode/minimax-m3")
     @test _parse_acp_model("acp:gemini:gemini-3-flash")[1] == ["gemini", "--experimental-acp"]
+    @test _parse_acp_model("acp:codex") == (["codex-acp"], "")
+    @test _parse_acp_model("acp:codex:provider/model:variant") ==
+          (["codex-acp"], "provider/model:variant")
     @test_throws ArgumentError _parse_acp_model("acp:nosuchagent")
 end
 
@@ -69,6 +72,13 @@ end
 
     # Updates with no AgentEvent counterpart are dropped, not reported as errors.
     @test isempty(_map_acp_update(Dict("sessionUpdate" => "available_commands_update")))
+    # Captured from codex-acp 2.5.0: titles and thread status are ordinary session metadata.
+    @test isempty(_map_acp_update(Dict("sessionUpdate" => "session_info_update",
+                                      "title" => "Read the probe file")))
+    for status in ("active", "idle")
+        @test isempty(_map_acp_update(Dict("sessionUpdate" => "session_info_update",
+            "_meta" => Dict("codex" => Dict("threadStatus" => Dict("type" => status))))))
+    end
     # Anything genuinely unknown must surface, or a mapping gap stays invisible.
     unknown = _map_acp_update(Dict("sessionUpdate" => "brand_new_thing"))
     @test length(unknown) == 1 && unknown[1] isa ACP.AgentError
@@ -615,6 +625,38 @@ end
     end
     with_fake_agent(caps = Dict{String,Any}()) do h
         @test !Kaimon.acp_queues_prompts(h)   # absent capability is not queueing
+    end
+end
+
+@testset "ACP: Codex session metadata preserves tool-using turns" begin
+    # Replay the standard updates captured around a codex-acp 2.5.0 file read.
+    updates = Any[
+        Dict("sessionUpdate" => "session_info_update",
+             "_meta" => Dict("codex" => Dict("threadStatus" => Dict("type" => "active")))),
+        Dict("sessionUpdate" => "tool_call", "toolCallId" => "read-probe",
+             "title" => "Read file 'probe.txt'", "kind" => "read", "status" => "in_progress"),
+        Dict("sessionUpdate" => "tool_call_update", "toolCallId" => "read-probe",
+             "status" => "completed"),
+        Dict("sessionUpdate" => "agent_message_chunk",
+             "content" => Dict("type" => "text", "text" => "probe contents")),
+        Dict("sessionUpdate" => "session_info_update",
+             "_meta" => Dict("codex" => Dict("threadStatus" => Dict("type" => "idle")))),
+        Dict("sessionUpdate" => "session_info_update", "title" => "Read the probe file"),
+    ]
+    steps = Any[Dict("send" => Dict("jsonrpc" => "2.0", "method" => "session/update",
+                                   "params" => Dict("sessionId" => "fake-session", "update" => update)))
+                for update in updates]
+    with_fake_agent(; steps = steps) do h
+        drain_events(h; n = 20, timeout = 1.5)     # discard the handshake's copy
+        Kaimon.backend_send(h, "read the probe")
+        # TurnStarted, tool start/update, text delta/replay, TurnEnded.
+        evs = drain_events(h; n = 6, timeout = 6.0)
+        @test any(e -> e isa ACP.ToolCallStarted && e.call.kind === :read, evs)
+        @test any(e -> e isa ACP.ToolCallUpdated && e.update.status === :completed, evs)
+        @test any(e -> e isa ACP.AgentMessageChunk && !e.delta &&
+                       e.content == ACP.TextBlock("probe contents"), evs)
+        @test any(e -> e isa ACP.TurnEnded && e.stop_reason === :end_turn, evs)
+        @test !any(e -> e isa ACP.AgentError, evs)
     end
 end
 

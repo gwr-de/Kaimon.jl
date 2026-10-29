@@ -179,8 +179,22 @@ CLI. The agent's own model ids keep their slashes, which is why the separator is
 | `opencode` | `opencode acp` | Generated per-session config |
 | `claude` | `claude-agent-acp` | Over the wire (`session/set_model`) |
 | `gemini` | `gemini --experimental-acp` | Over the wire |
+| `codex` | `codex-acp` | Over the wire |
 
-Each session gets its own generated opencode config, which is what lets two agents run under
+For Codex, install the maintained
+[ACP adapter](https://github.com/agentclientprotocol/codex-acp) and make sure
+`codex-acp` is on Kaimon's `PATH`:
+
+```sh
+npm install -g @agentclientprotocol/codex-acp
+```
+
+The adapter includes a compatible Codex CLI and uses its existing login.
+`acp:codex` uses the adapter's default model; `acp:codex:<model-id>` selects a
+model over ACP. Initialization, model switching, and a tool-using turn were
+verified with adapter version 2.5.0.
+
+Each OpenCode session gets its own generated config, which is what lets two agents run under
 different presets at once. It replaces the user's own, with one thing carried across: the
 `provider` block, so a model served locally stays selectable
 (`acp:opencode:ollama/qwen2.5:14b`). MCP servers are not carried -- a server Kaimon did not
@@ -218,6 +232,14 @@ An agent with neither of the first two keeps only the third. Kaimon says so on t
 stream at spawn rather than letting the preset read as configured, so a `notebook` agent
 whose native tools are not actually bound reports it in its first `AgentError`. For a
 preset that holds against native tools, use `acp:opencode` or `acp:claude`.
+
+Codex retains its own configuration, MCP servers, and approval/sandbox modes.
+The `notebook` and `specialist` presets do not disable its native tools or
+inherited MCP servers. In adapter 2.5.0, a native file read completes without
+a permission request even in read-only mode. Kaimon's own tools remain gated,
+and the enforcement-gap notice above applies. Set `INITIAL_AGENT_MODE=read-only`
+in Kaimon's environment to start the adapter in read-only mode for experiments;
+that mode still allows native file reads.
 
 !!! note "A boundary, not a sandbox"
     Path confinement is a correctness boundary against a cooperative agent. It resolves
