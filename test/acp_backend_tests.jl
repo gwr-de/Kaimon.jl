@@ -147,6 +147,8 @@ end
     auto = ACPClientBackend(; permission = "auto", disallowed_tools = String[])
     @test _acp_decide(auto, "write")["allow"] === false
     @test _acp_decide(auto, "read")["allow"] === true
+    @test _acp_decide(auto, "mcp.Kaimon.write")["allow"] === false
+    @test _acp_decide(auto, "mcp.kaimon_owned_0123456789abcdef.read")["allow"] === true
 
     # An agent we can't identify gets nothing.
     @test acp_bridge_decide("no-such-agent", "read", nothing)["allow"] === false
@@ -391,6 +393,13 @@ end
 end
 
 @testset "ACP: _acp_tool_matches" begin
+    # Codex uses dotted names; extension tool names keep their own dots.
+    @test Kaimon._acp_split_tool("mcp.Kaimon.agent_open") == ("Kaimon", "agent_open")
+    @test Kaimon._acp_tool_matches("mcp.Kaimon.agent_open", "mcp__kaimon__agent_open")
+    @test Kaimon._acp_tool_matches("mcp.kaimon_owned_0123456789abcdef.agent_open", "mcp__kaimon__agent_open")
+    @test Kaimon._acp_tool_matches("mcp.kaimon_owned_0123456789abcdef.slate.run", "mcp__kaimon")
+    @test !Kaimon._acp_tool_matches("mcp.other.agent_open", "mcp__kaimon__agent_open")
+    @test !Kaimon._acp_tool_matches("mcp.other.slate.run", "mcp__kaimon")
     # A server prefix must not swallow the agent's own tools. This is the case
     # `_tool_name_matches` gets wrong for ACP: it would match every bare name.
     @test Kaimon._acp_tool_matches("mcp__kaimon__ex", "mcp__kaimon")

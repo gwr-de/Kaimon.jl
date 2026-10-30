@@ -156,9 +156,10 @@ with the preset's allowlist, except under `specialist`, where it replaces it.
   `only` refuses a caller-supplied `mcp_config`, and refuses to start an agent that names
   MCP tools before the Kaimon server's port is known.
 
-A preset's **deny** half applies at Kaimon's own `tools/call` door for every backend, so
-`mcp__kaimon` entries -- the recursion guard included -- always hold. Its reach into the
-agent's *own* tools depends on the agent; see below.
+A preset's **deny** half applies at Kaimon's own `tools/call` door when the connection
+identifies its owning agent. Kaimon's generated connections carry that identity. Owned
+Codex sessions disable inherited MCP connections to prevent an untagged connection from
+bypassing this check. Its reach into the agent's *own* tools depends on the agent; see below.
 
 !!! warning "Recursion guard"
     By default an owned agent is blocked from calling the `agent_*` tools
@@ -215,9 +216,10 @@ is queued or destroys the reply in progress, which the agent declares at `initia
 
 ### Where an ACP preset is enforced
 
-Every Kaimon tool an ACP agent calls is checked against the preset at Kaimon's own
-door, and any path argument it carries is confined to the agent's `cwd`. That part holds
-for every agent. What differs is whether the preset reaches the agent's **own** `Read`,
+Every tagged Kaimon tool call is checked against the preset at Kaimon's own
+door, and any path argument it carries is confined to the agent's `cwd`. Untagged
+connections cannot be attributed to an owned agent. What differs is whether the preset
+reaches the agent's **own** `Read`,
 `Write` and `Bash`, because ACP has no way to express tool policy. There are three
 routes, and none is universal:
 
@@ -233,11 +235,22 @@ stream at spawn rather than letting the preset read as configured, so a `noteboo
 whose native tools are not actually bound reports it in its first `AgentError`. For a
 preset that holds against native tools, use `acp:opencode` or `acp:claude`.
 
-Codex retains its own configuration, MCP servers, and approval/sandbox modes.
-The `notebook` and `specialist` presets do not disable its native tools or
-inherited MCP servers. In adapter 2.5.0, a native file read completes without
-a permission request even in read-only mode. Kaimon's own tools remain gated,
-and the enforcement-gap notice above applies. Set `INITIAL_AGENT_MODE=read-only`
+Owned Codex sessions retain their existing login, `CODEX_HOME`, non-MCP settings,
+and approval/sandbox modes. Before launching, Kaimon asks the adapter's bundled
+Codex app-server for every MCP configuration layer under the session's working
+directory and trust setting. All inherited servers (including user/project aliases and
+`CODEX_CONFIG` entries) are disabled with process-local overrides. Discovery failure
+refuses the spawn. The tagged connection gets a fresh `kaimon_owned_<id>` name
+and is installed through the same process-local overrides. No servers are sent
+through `session/new`, so the adapter's collision filter cannot discard it.
+No global configuration or credentials are rewritten. This requires the adapter's
+`cli` and `CODEX_CONFIG` interfaces (verified with 2.5.0).
+
+The `notebook` and `specialist` presets still do not disable Codex's native tools.
+In adapter 2.5.0, a native file read completes without a permission request even
+in read-only mode. Policy and path checks apply to the tagged MCP calls, not to
+arbitrary network requests or commands issued through native shell tools. The
+enforcement-gap notice above applies. Set `INITIAL_AGENT_MODE=read-only`
 in Kaimon's environment to start the adapter in read-only mode for experiments;
 that mode still allows native file reads.
 
