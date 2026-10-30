@@ -545,6 +545,14 @@ end
         @test Kaimon.connected_sessions(mgr; include_extensions = true) == [ext]
         @test Kaimon.get_connection_by_key(mgr, ekey; include_extensions = true) === ext
 
+        # An extension's own TUI panel is that machinery: its ctx.eval must reach the extension.
+        # (This connection has no live channel, so the eval itself reports "not connected".)
+        pctx = Kaimon.ExtPanelContext(ekey, mgr, "slate", proj, 0, Dict{Symbol,Any}(), identity, identity)
+        r = Kaimon.ext_panel_eval(pctx, "1")
+        @test r.stderr != "Error: extension session not found"
+        @test occursin("Gate not connected", string(r.exception))
+        @test occursin("Gate not connected", Kaimon.ext_panel_request(pctx, "x"))
+
         old_mgr = Kaimon.GATE_CONN_MGR[]
         Kaimon.GATE_CONN_MGR[] = mgr
         try
