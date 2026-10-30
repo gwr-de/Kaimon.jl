@@ -138,6 +138,7 @@ include("utils.jl")
 include("database.jl")
 include("fts_index.jl")   # lexical (SQLite/FTS5) half of hybrid code search
 include("qdrant_client.jl")
+include("search_services.jl") # search settings, per-account ports, private service records
 include("qdrant_server.jl")   # managed Qdrant child-process launcher (opt-in via Qdrant_jll)
 include("tools.jl")
 include("Generate.jl")
@@ -226,6 +227,11 @@ function __init__()
     # Stamp the real process start for uptime reporting (the const is a
     # precompile-baked placeholder; see tui/io.jl).
     _SERVER_START_TIME[] = Dates.now()
+
+    # The Qdrant client asks Kaimon where Qdrant is and which key it takes (search settings, then
+    # the managed instance's record). Installed at runtime: a function in a precompiled Ref would
+    # be baked into the image.
+    QdrantClient.ENDPOINT[] = qdrant_endpoint
 
     # Wire Kaimon's host integrations into KaimonGate. Standalone, the gate uses
     # safe defaults; here we give it Kaimon's version, personality, REPL-mirror
