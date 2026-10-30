@@ -567,7 +567,7 @@ end
 """Index a collection for a specific entry."""
 function _manage_index_collection!(m::KaimonModel, entry)
     isempty(entry.project_path) && return
-    if !(m.search_qdrant_up && m.search_ollama_up && m.search_model_available)
+    if !(m.search_qdrant_up && m.search_embedder_up && m.search_model_available)
         m.search_manage_op_status[entry.collection] = "Services not ready"
         return
     end
@@ -588,7 +588,7 @@ end
 """Sync a collection for a specific entry."""
 function _manage_sync_collection!(m::KaimonModel, entry)
     isempty(entry.project_path) && return
-    if !(m.search_qdrant_up && m.search_ollama_up && m.search_model_available)
+    if !(m.search_qdrant_up && m.search_embedder_up && m.search_model_available)
         m.search_manage_op_status[entry.collection] = "Services not ready"
         return
     end
@@ -613,7 +613,7 @@ end
 """Reindex (recreate) a collection for a specific entry."""
 function _manage_reindex_collection!(m::KaimonModel, entry)
     isempty(entry.project_path) && return
-    if !(m.search_qdrant_up && m.search_ollama_up && m.search_model_available)
+    if !(m.search_qdrant_up && m.search_embedder_up && m.search_model_available)
         m.search_manage_op_status[entry.collection] = "Services not ready"
         return
     end

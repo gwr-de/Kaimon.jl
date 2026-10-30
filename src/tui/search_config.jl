@@ -62,7 +62,9 @@ function _refresh_search_health_async!(m::KaimonModel; force::Bool = false)
         collections = health.qdrant_up ? QdrantClient.list_collections() : String[]
         (
             qdrant_up = health.qdrant_up,
-            ollama_up = health.ollama_up,
+            embedder_up = health.embedder_up,
+            embedding_backend = health.embedding_backend,
+            embedding_where = health.embedding_where,
             model_available = health.model_available,
             collection_count = health.collection_count,
             collections = collections,
@@ -131,7 +133,7 @@ function _execute_search!(m::KaimonModel)
 
     spawn_task!(m._task_queue, :search_results) do
         # Pre-flight check
-        svc_err = _require_services(need_ollama = true, model = model)
+        svc_err = _require_services(need_embedder = true, model = model)
         if svc_err !== nothing
             return Dict[Dict(
                 "payload" => Dict(
@@ -147,7 +149,7 @@ function _execute_search!(m::KaimonModel)
             )]
         end
 
-        embedding = get_ollama_embedding(query_text; model = model)
+        embedding = get_embedding(query_text; model = model)
         if isempty(embedding)
             return Dict[Dict(
                 "payload" => Dict(
@@ -239,12 +241,28 @@ function _delete_search_collection!(m::KaimonModel)
     end
 end
 
-"""Pull the embedding model via Ollama in the background."""
+"""
+Get the embedding model in the background: Ollama pulls it, or for the llama.cpp backend the same
+model file is downloaded from Ollama's registry into the model directory.
+"""
 function _pull_embedding_model_async!(
     m::KaimonModel;
     model::String = m.search_embedding_model,
 )
-    if !m.search_ollama_up
+    if m.search_embedding_backend === :llamacpp
+        _set_search_status!("Downloading model '$model'...")
+        _push_log!(:info, "Downloading '$model' from Ollama's registry into $(embedding_model_dir())")
+        spawn_task!(m._task_queue, :search_pull_model) do
+            try
+                download_embedding_model!(model)
+                (success = true, model = model, status = "success")
+            catch e
+                (success = false, model = model, status = sprint(showerror, e))
+            end
+        end
+        return
+    end
+    if !m.search_embedder_up
         _set_search_status!("Cannot pull: Ollama not running")
         return
     end
@@ -254,7 +272,7 @@ function _pull_embedding_model_async!(
         try
             # ollama pull streams JSON — we just need the final status
             response = HTTP.post(
-                "http://localhost:11434/api/pull",
+                "$(ollama_url())/api/pull",
                 ["Content-Type" => "application/json"],
                 JSON.json(Dict("name" => model, "stream" => false));
                 request_timeout = 600,  # models can be large
@@ -323,6 +341,53 @@ function _install_managed_qdrant_async!(m::KaimonModel)
     end
 end
 
+"""
+Switch the embedding backend and save it in search.json. Choosing llama.cpp installs it into its
+service environment first if needed. `KAIMON_EMBEDDING_BACKEND`, when set, still wins.
+"""
+function _set_embedding_backend!(m::KaimonModel, backend::Symbol)
+    cfg = load_search_config()
+    emb = get!(() -> Dict{String,Any}(), cfg, "embedding")
+    emb["backend"] = String(backend)
+    save_search_config(cfg)
+    name = backend === :llamacpp ? "llama.cpp" : "Ollama"
+    if embedding_backend() !== backend
+        _set_search_status!("Saved $name, but KAIMON_EMBEDDING_BACKEND overrides it")
+    else
+        _set_search_status!("Embedding backend: $name")
+        _push_log!(:info, "Embedding backend set to $name")
+    end
+    m.search_embedding_backend = embedding_backend()
+    if m.search_embedding_backend === :llamacpp && !llamacpp_installed()
+        _install_llamacpp_async!(m)
+    else
+        m.search_health_last_check = 0.0
+        _refresh_search_health_async!(m)
+    end
+end
+
+"""Install `llama_cpp_jll` into its service environment (subprocess), then load it in-process."""
+function _install_llamacpp_async!(m::KaimonModel)
+    _set_search_status!("Installing llama.cpp (downloading binary)...")
+    _push_log!(:info, "Installing llama_cpp_jll into Kaimon's service env — this downloads a binary artifact.")
+    cmd = llamacpp_install_command()
+    spawn_task!(m._task_queue, :search_install_llamacpp) do
+        io = IOBuffer()
+        installed = try
+            proc = run(pipeline(cmd; stdout = io, stderr = io); wait = false)
+            wait(proc)
+            proc.exitcode == 0
+        catch e
+            print(io, "\n", sprint(showerror, e))
+            false
+        end
+        loaded = installed && (try load_llamacpp_jll!() catch; false end)
+        out = String(take!(io))
+        tail = join(last(split(out, '\n'; keepempty = false), 12), "\n")
+        (installed = installed, loaded = loaded, output = tail)
+    end
+end
+
 """Stop the managed Qdrant child and disable auto-launch (persist mode=off)."""
 function _disable_managed_qdrant!(m::KaimonModel)
     disable_managed_qdrant!()
@@ -385,7 +450,7 @@ function _open_search_config!(m::KaimonModel)
         ""
     end
     spawn_task!(m._task_queue, :search_config_info) do
-        installed_models = list_ollama_models()
+        installed_models = list_embedding_models()
         models = [
             (
                 name = n,
@@ -466,7 +531,14 @@ function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
             end
         end
         :char => begin
-            if evt.char == '+' || evt.char == '='
+            if evt.char == 'b'
+                # On llama.cpp that isn't installed yet, [b] installs it; otherwise it switches.
+                if m.search_embedding_backend === :llamacpp && !m.search_embedder_up
+                    _install_llamacpp_async!(m)
+                else
+                    _set_embedding_backend!(m, m.search_embedding_backend === :llamacpp ? :ollama : :llamacpp)
+                end
+            elseif evt.char == '+' || evt.char == '='
                 m.search_result_count = min(50, m.search_result_count + 1)
             elseif evt.char == '-'
                 m.search_result_count = max(1, m.search_result_count - 1)

@@ -6,7 +6,7 @@ Indexes Julia source files into Qdrant for semantic code search.
 Uses Ollama for embeddings (qwen3-embedding model).
 """
 
-# Uses QdrantClient, get_ollama_embedding, and DEFAULT_EMBEDDING_MODEL from parent scope
+# Uses QdrantClient, get_embedding, and DEFAULT_EMBEDDING_MODEL from parent scope
 
 # ── Collection prefix for shared Qdrant instances ────────────────────────────
 # Set via KAIMON_QDRANT_PREFIX env var or config.json "qdrant_prefix" field.

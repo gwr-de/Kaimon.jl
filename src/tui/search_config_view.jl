@@ -59,7 +59,12 @@ function _view_search_config(m::KaimonModel, area::Rect, buf::Buffer)
     x = inner.x + 1
 
     # ── Section 1: Header ──
-    set_string!(buf, x, regions[1].y, "Embedding Model", tstyle(:text, bold = true))
+    backend = m.search_embedding_backend === :llamacpp ? "llama.cpp" : "Ollama"
+    _write_spans!(buf, x, regions[1].y, [
+        ("Embedding Model", tstyle(:text, bold = true)),
+        ("   via ", tstyle(:text_dim)), (backend, tstyle(:accent)),
+        (isempty(m.search_embedding_where) ? "" : "  $(m.search_embedding_where)", tstyle(:text_dim)),
+    ])
 
     # ── Section 2: Model list ──
     model_area = regions[2]
@@ -152,7 +157,8 @@ function _view_search_config(m::KaimonModel, area::Rect, buf::Buffer)
     hint_y = regions[8].y
     _write_spans!(buf, x, hint_y, [
         ("↑↓", tstyle(:accent)), (" navigate  ", tstyle(:text_dim)),
-        ("Enter", tstyle(:accent)), (" select", tstyle(:text_dim)),
+        ("Enter", tstyle(:accent)), (" select  ", tstyle(:text_dim)),
+        ("b", tstyle(:accent)), (" backend (Ollama / llama.cpp)", tstyle(:text_dim)),
     ])
     _write_spans!(buf, x, hint_y + 1, [
         ("+/-", tstyle(:accent)), (" results  ", tstyle(:text_dim)),

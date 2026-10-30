@@ -53,12 +53,13 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
 
     # ── Row 1: Service health (condensed when both up) ──
     qdrant_up = m.search_qdrant_up
-    ollama_ok = m.search_ollama_up && m.search_model_available
+    ollama_ok = m.search_embedder_up && m.search_model_available
+    embedder = m.search_embedding_backend === :llamacpp ? "llama.cpp" : "Ollama"
     if qdrant_up && ollama_ok
         _write_spans!(buf, x, y, [
             ("● ", tstyle(:success)), ("Qdrant", txt),
             (sep, dim),
-            ("● ", tstyle(:success)), ("Ollama", txt),
+            ("● ", tstyle(:success)), (embedder, txt),
             (" ", dim), (m.search_embedding_model, tstyle(:accent)),
         ])
         y += 1
@@ -83,15 +84,21 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
         y += 1
         if ollama_ok
             _write_spans!(buf, x, y, [
-                ("● ", tstyle(:success)), ("Ollama  ", txt),
+                ("● ", tstyle(:success)), (rpad(embedder, 8), txt),
                 (m.search_embedding_model, tstyle(:accent)),
             ])
-        elseif m.search_ollama_up
+        elseif m.search_embedder_up
             _write_spans!(buf, x, y, [
-                ("◐ ", tstyle(:warning)), ("Ollama  ", txt),
+                ("◐ ", tstyle(:warning)), (rpad(embedder, 8), txt),
                 ("model missing  ", txt),
                 ("[p]", tstyle(:warning)),
                 (" pull $(m.search_embedding_model)", dim),
+            ])
+        elseif m.search_embedding_backend === :llamacpp
+            _write_spans!(buf, x, y, [
+                ("○ ", tstyle(:error)), (rpad(embedder, 8), txt),
+                ("not installed  ", txt), ("[o]", tstyle(:warning)), (" then ", dim),
+                ("[b]", tstyle(:warning)), (" to install", dim),
             ])
         else
             _write_spans!(buf, x, y, [

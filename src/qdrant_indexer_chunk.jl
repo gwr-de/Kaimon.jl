@@ -600,7 +600,7 @@ function split_chunk_recursive(chunk::Dict, max_length::Int, model::String, dept
 
     # Try to embed the chunk as-is if it's within size limit
     if length(text) <= max_length
-        embedding = get_ollama_embedding(text; model=model)
+        embedding = get_embedding(text; model=model)
         if !isempty(embedding)
             # Success - return chunk with embedding
             return [merge(chunk, Dict("embedding" => embedding, "text" => text))]
@@ -614,7 +614,7 @@ function split_chunk_recursive(chunk::Dict, max_length::Int, model::String, dept
         # Can't split further - just truncate
         with_index_logger(() -> @warn "Cannot split chunk further, truncating" file = chunk["file"] start_line = chunk["start_line"] original_length = length(text))
         truncated = first(text, max_length)
-        embedding = get_ollama_embedding(truncated; model=model)
+        embedding = get_embedding(truncated; model=model)
         if !isempty(embedding)
             return [merge(chunk, Dict("embedding" => embedding, "text" => truncated))]
         else

@@ -140,6 +140,7 @@ include("fts_index.jl")   # lexical (SQLite/FTS5) half of hybrid code search
 include("qdrant_client.jl")
 include("search_services.jl") # search settings, per-account ports, private service records
 include("qdrant_server.jl")   # managed Qdrant child-process launcher (opt-in via Qdrant_jll)
+include("llamacpp_server.jl") # managed llama.cpp embedding server (opt-in via llama_cpp_jll)
 include("tools.jl")
 include("Generate.jl")
 include("gate_prefs.jl")
@@ -263,6 +264,7 @@ function __init__()
 
     # Reap a Kaimon-managed Qdrant child (if we spawned one) when the process exits.
     atexit(shutdown_qdrant!)
+    atexit(shutdown_llamacpp!)
 
     # Auto-start TCP gate if configured via env vars or kaimon.toml [gate]
     KaimonGate._auto_serve!()

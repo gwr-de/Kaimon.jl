@@ -401,8 +401,8 @@ function _grep_semantic_windows(query::Union{Nothing,AbstractString}, collection
     col, err = _resolve_collection(String(collection), QdrantClient.list_collections())
     err === nothing || return Tuple{String,Int,Int,Float64}[]
     model = resolve_search_model(col)
-    (ping_ollama() && check_ollama_model(model)) || return Tuple{String,Int,Int,Float64}[]
-    emb = get_ollama_embedding(String(query); model = model)
+    (ping_embedder() && embedding_model_available(model)) || return Tuple{String,Int,Int,Float64}[]
+    emb = get_embedding(String(query); model = model)
     isempty(emb) && return Tuple{String,Int,Int,Float64}[]
     out = Tuple{String,Int,Int,Float64}[]
     for r in QdrantClient.search(col, emb; limit = 80)

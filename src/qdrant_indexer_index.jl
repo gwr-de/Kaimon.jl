@@ -109,9 +109,9 @@ function _embed_upsert!(
         # Chunks are already size-fit by split_to_fit; embed directly. A rare embed
         # failure retries on the truncated text under the SAME id (keeps FTS↔Qdrant 1:1);
         # if that also fails the chunk stays lexical-only.
-        embedding = get_ollama_embedding(text; model=embedding_model)
+        embedding = get_embedding(text; model=embedding_model)
         if isempty(embedding)
-            embedding = get_ollama_embedding(first(text, max_length); model=embedding_model)
+            embedding = get_embedding(first(text, max_length); model=embedding_model)
             if isempty(embedding)
                 with_index_logger(() -> @warn "Failed to embed chunk; lexical-only" file = basename(file_path) start_line = chunk["start_line"])
                 continue

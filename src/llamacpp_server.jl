@@ -1,0 +1,293 @@
+# ── Managed llama.cpp embeddings ──────────────────────────────────────────────
+# An embedding backend Kaimon runs itself, for machines where Ollama can't be made private:
+# Ollama has no authentication and listens on TCP, so on a shared machine every account can use
+# it. `llama-server` from `llama_cpp_jll` takes an API key, so Kaimon runs it on loopback with a
+# key generated at each launch, recorded the way managed Qdrant is (search_services.jl).
+#
+# It runs the same GGUF file Ollama uses for a model (a model named like Ollama's, e.g.
+# `qwen3-embedding:0.6b`), so vectors match Ollama's and existing indexes stay valid. The file is
+# taken from an Ollama store when one has it, else downloaded once from Ollama's registry.
+#
+# Like Qdrant_jll, `llama_cpp_jll` lives in a Kaimon-owned service environment, installed only
+# when this backend is chosen and loaded in-process via LOAD_PATH + `Base.require`.
+
+const _LLAMACPP_JLL = Base.PkgId(Base.UUID("98bd2d0b-bc7c-583a-ba54-7299b0ad0e7f"), "llama_cpp_jll")
+const _LLAMACPP_JLL_MOD = Ref{Any}(nothing)
+const _LLAMACPP_PROCS = Dict{String,Any}()        # model => Process, for servers this process started
+const _LLAMACPP_BEATS = Dict{String,Any}()        # model => heartbeat Timer
+const _LLAMACPP_LOCK = ReentrantLock()
+
+const OLLAMA_REGISTRY = "https://registry.ollama.ai"
+
+# ── Installation ──────────────────────────────────────────────────────────────
+
+"The Kaimon-owned environment that holds `llama_cpp_jll`."
+llamacpp_service_env() = mkpath(joinpath(kaimon_cache_dir(), "service-env-llamacpp"))
+
+"A subprocess command that installs `llama_cpp_jll` into its service environment."
+function llamacpp_install_command()::Cmd
+    env = llamacpp_service_env()
+    code = "import Pkg; Pkg.activate(raw\"$env\"); Pkg.add(Pkg.PackageSpec(name=\"llama_cpp_jll\"))"
+    return `$(Base.julia_cmd()) --startup-file=no --color=no -e $code`
+end
+
+"True if `llama_cpp_jll` is installed in its service environment (or already loaded)."
+function llamacpp_installed()::Bool
+    _LLAMACPP_JLL_MOD[] !== nothing && return true
+    manifest = joinpath(llamacpp_service_env(), "Manifest.toml")
+    return isfile(manifest) && occursin("llama_cpp_jll", read(manifest, String))
+end
+
+"Load `llama_cpp_jll` from its service environment into this process. Returns `true` on success."
+function load_llamacpp_jll!()::Bool
+    _LLAMACPP_JLL_MOD[] !== nothing && return true
+    env = llamacpp_service_env()
+    isfile(joinpath(env, "Manifest.toml")) || return false
+    env in LOAD_PATH || push!(LOAD_PATH, env)
+    try
+        _LLAMACPP_JLL_MOD[] = Base.require(_LLAMACPP_JLL)
+        return true
+    catch e
+        @warn "Failed to load llama_cpp_jll from its service env" env exception = (e, catch_backtrace())
+        return false
+    end
+end
+
+# ── Model files ───────────────────────────────────────────────────────────────
+
+"Split an Ollama model name into (namespace, name, tag): `qwen3-embedding:0.6b` → (\"library\", ...)."
+function split_model_name(model::AbstractString)
+    base, tag = occursin(':', model) ? split(model, ':'; limit = 2) : (model, "latest")
+    ns, name = occursin('/', base) ? split(base, '/'; limit = 2) : ("library", base)
+    return (String(ns), String(name), String(tag))
+end
+
+"Ollama's model store: `OLLAMA_MODELS`, else `~/.ollama/models`."
+ollama_models_dir() = expanduser(get(ENV, "OLLAMA_MODELS", joinpath("~", ".ollama", "models")))
+
+# The digest of the weights layer in an Ollama manifest.
+function _manifest_model_digest(manifest::AbstractDict)
+    for l in get(manifest, "layers", [])
+        endswith(String(get(l, "mediaType", "")), ".model") && return String(l["digest"])
+    end
+    return nothing
+end
+
+"The GGUF file for `model` in an Ollama store, or `nothing`."
+function ollama_store_model_file(model::AbstractString)
+    ns, name, tag = split_model_name(model)
+    mf = joinpath(ollama_models_dir(), "manifests", "registry.ollama.ai", ns, name, tag)
+    isfile(mf) || return nothing
+    digest = try; _manifest_model_digest(JSON.parse(read(mf, String))); catch; nothing; end
+    digest === nothing && return nothing
+    f = joinpath(ollama_models_dir(), "blobs", replace(digest, ":" => "-"))
+    return isfile(f) ? f : nothing
+end
+
+"Where a downloaded copy of `model` is kept."
+downloaded_model_path(model::AbstractString) =
+    joinpath(embedding_model_dir(), join(split_model_name(model), "-") * ".gguf")
+
+"The GGUF file to serve `model` from: an Ollama store's copy, else a downloaded one, else `nothing`."
+function embedding_model_file(model::AbstractString)
+    f = ollama_store_model_file(model)
+    f === nothing || return f
+    d = downloaded_model_path(model)
+    return isfile(d) ? d : nothing
+end
+
+"Models available to the llama.cpp backend: those in an Ollama store and those downloaded."
+function llamacpp_local_models()::Vector{String}
+    out = String[]
+    root = joinpath(ollama_models_dir(), "manifests", "registry.ollama.ai")
+    if isdir(root)
+        for ns in readdir(root), name in (isdir(joinpath(root, ns)) ? readdir(joinpath(root, ns)) : String[])
+            dir = joinpath(root, ns, name)
+            isdir(dir) || continue
+            for tag in readdir(dir)
+                push!(out, (ns == "library" ? name : "$ns/$name") * ":" * tag)
+            end
+        end
+    end
+    if isdir(embedding_model_dir())
+        for f in readdir(embedding_model_dir())
+            m = match(r"^(.+)-([^-]+)-([^-]+)\.gguf$", f)
+            m === nothing && continue
+            ns, name, tag = m.captures
+            push!(out, (ns == "library" ? name : "$ns/$name") * ":" * tag)
+        end
+    end
+    return unique!(out)
+end
+
+"""
+    download_embedding_model!(model) -> String
+
+Download `model`'s GGUF file from Ollama's registry into `embedding_model_dir()` and return its
+path. The file is checked against the manifest's SHA-256 digest before it is kept. The transfer
+runs in a subprocess using the `Downloads` standard library.
+"""
+function download_embedding_model!(model::AbstractString)::String
+    ns, name, tag = split_model_name(model)
+    r = HTTP.get("$OLLAMA_REGISTRY/v2/$ns/$name/manifests/$tag",
+                 ["Accept" => "application/vnd.docker.distribution.manifest.v2+json"];
+                 status_exception = false)
+    r.status == 200 || error("Ollama's registry has no model '$model' (HTTP $(r.status))")
+    digest = _manifest_model_digest(JSON.parse(String(r.body)))
+    digest === nothing && error("The manifest for '$model' names no model file")
+    dest = downloaded_model_path(model)
+    mkpath(dirname(dest))
+    tmp = dest * ".part"
+    url = "$OLLAMA_REGISTRY/v2/$ns/$name/blobs/$digest"
+    code = "using Downloads; Downloads.download(ARGS[1], ARGS[2])"
+    run(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`)
+    got = "sha256:" * bytes2hex(open(SHA.sha256, tmp))
+    if got != digest
+        rm(tmp; force = true)
+        error("The download of '$model' does not match its digest ($got ≠ $digest)")
+    end
+    mv(tmp, dest; force = true)
+    return dest
+end
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+"Use `embedding.llamacpp_port` and nothing else: a taken port is an error."
+llamacpp_fixed_port()::Bool =
+    _setting_bool(search_setting("embedding", "llamacpp_fixed_port", "KAIMON_LLAMACPP_FIXED_PORT", false))
+
+"CPU threads for the embedding server. Kept modest by default: it shares the machine."
+llamacpp_threads()::Int =
+    _setting_int(search_setting("embedding", "llamacpp_threads", "KAIMON_LLAMACPP_THREADS",
+                                min(8, Sys.CPU_THREADS)), min(8, Sys.CPU_THREADS))
+
+_model_slug(model::AbstractString) = replace(model, r"[^A-Za-z0-9._-]" => "_")
+
+"This machine's record for the server of `model`."
+llamacpp_record_path(model::AbstractString) =
+    joinpath(private_dir(joinpath(kaimon_cache_dir(), "llamacpp")), "$(gethostname())-$(_model_slug(model)).json")
+
+llamacpp_log_path(model::AbstractString) =
+    joinpath(private_dir(joinpath(kaimon_cache_dir(), "llamacpp")), "$(gethostname())-$(_model_slug(model)).log")
+
+_llamacpp_child_alive(model) = (p = get(_LLAMACPP_PROCS, model, nothing); p isa Base.Process && Base.process_running(p))
+
+"The server answers on `port` and accepts `key`."
+function _llamacpp_ok(port::Integer, key::AbstractString)::Bool
+    try
+        r = HTTP.get("http://127.0.0.1:$port/v1/models", ["Authorization" => "Bearer $key"];
+                     connect_timeout = 2, request_timeout = 5, status_exception = false, retry = false)
+        return r.status == 200
+    catch
+        return false
+    end
+end
+
+"The arguments `llama-server` is started with. Pooling comes from the model file, as in Ollama."
+llamacpp_server_args(file::AbstractString, port::Integer, key::AbstractString; threads::Integer = llamacpp_threads()) =
+    ["-m", String(file), "--embeddings", "--host", "127.0.0.1", "--port", string(port),
+     "--api-key", String(key), "-c", "8192", "-b", "8192", "-ub", "8192",
+     "-t", string(threads), "-ngl", "99"]
+
+"""
+    ensure_llamacpp!(model; timeout=120) -> Union{Tuple{String,String},Nothing}
+
+The `(url, key)` of a llama.cpp server for `model` on this machine, starting one if needed.
+`nothing` when the backend isn't installed, the model file isn't available, or the server didn't
+come up. Concurrent callers share one server.
+"""
+function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
+    model = String(model)
+    rec = llamacpp_record_path(model)
+    r = read_service_record(rec)
+    (r !== nothing && record_live_here(r) && _llamacpp_ok(r.port, r.key)) &&
+        return ("http://127.0.0.1:$(r.port)", r.key)
+    lock(_LLAMACPP_LOCK) do
+        r = read_service_record(rec)
+        (r !== nothing && record_live_here(r) && _llamacpp_ok(r.port, r.key)) &&
+            return ("http://127.0.0.1:$(r.port)", r.key)
+        load_llamacpp_jll!() || return nothing
+        file = embedding_model_file(model)
+        if file === nothing
+            @warn "No model file for '$model': pull it (the [p] key on the Search tab) or put it in $(embedding_model_dir())"
+            return nothing
+        end
+        fixed = llamacpp_fixed_port()
+        port = service_free_port(llamacpp_port_setting(); fixed)
+        if port === nothing
+            @error fixed ? "The llama.cpp server is fixed to port $(llamacpp_port_setting()), which is in use" :
+                           "No free port for the llama.cpp server near $(llamacpp_port_setting())"
+            return nothing
+        end
+        key = new_service_key()
+        log = llamacpp_log_path(model)
+        mod = _LLAMACPP_JLL_MOD[]
+        exe = Base.invokelatest(mod.llama_server)::Cmd
+        cmd = `$exe $(llamacpp_server_args(file, port, key))`
+        @info "Starting llama.cpp embedding server" model port log
+        logio = open(log, "w")
+        proc = run(pipeline(cmd; stdin = devnull, stdout = logio, stderr = logio); wait = false)
+        _LLAMACPP_PROCS[model] = proc
+        write_service_record(rec, ServiceRecord(port, key; pid = getpid(proc)))
+        haskey(_LLAMACPP_BEATS, model) && close(_LLAMACPP_BEATS[model])
+        _LLAMACPP_BEATS[model] = start_service_heartbeat!(rec, () -> _llamacpp_child_alive(model))
+        t0 = time()
+        while time() - t0 < timeout
+            _llamacpp_ok(port, key) && return ("http://127.0.0.1:$port", key)
+            Base.process_running(proc) || break
+            sleep(0.25)
+        end
+        @error "The llama.cpp embedding server did not come up; see its log" model log
+        _stop_llamacpp_locked!(model)
+        return nothing
+    end
+end
+
+function _stop_llamacpp_locked!(model::AbstractString)
+    proc = pop!(_LLAMACPP_PROCS, model, nothing)
+    if proc isa Base.Process && Base.process_running(proc)
+        try
+            kill(proc)
+            for _ in 1:20
+                Base.process_running(proc) || break
+                sleep(0.1)
+            end
+            Base.process_running(proc) && kill(proc, Base.SIGKILL)
+        catch
+        end
+    end
+    t = pop!(_LLAMACPP_BEATS, model, nothing)
+    t === nothing || close(t)
+    rec = llamacpp_record_path(model)
+    r = read_service_record(rec)
+    (r !== nothing && r.host == gethostname() && !_pid_alive(r.pid)) && rm(rec; force = true)
+    return nothing
+end
+
+"Stop the llama.cpp servers this process started (registered with `atexit`)."
+function shutdown_llamacpp!()
+    lock(_LLAMACPP_LOCK) do
+        for model in collect(keys(_LLAMACPP_PROCS))
+            _stop_llamacpp_locked!(model)
+        end
+    end
+end
+
+"""
+    llamacpp_embedding(text, model) -> Vector{Float64}
+
+Embed `text` with `model` through the managed llama.cpp server. Empty on failure.
+"""
+function llamacpp_embedding(text::AbstractString, model::AbstractString)::Vector{Float64}
+    ep = ensure_llamacpp!(model)
+    ep === nothing && return Float64[]
+    url, key = ep
+    r = HTTP.post("$url/v1/embeddings",
+                  ["Content-Type" => "application/json", "Authorization" => "Bearer $key"],
+                  JSON.json(Dict("model" => model, "input" => String(text)));
+                  status_exception = false, retry_non_idempotent = true)
+    r.status == 200 || (@debug "llama.cpp embedding failed" status = r.status; return Float64[])
+    data = get(JSON.parse(String(r.body)), "data", [])
+    isempty(data) && return Float64[]
+    return Float64.(first(data)["embedding"])
+end

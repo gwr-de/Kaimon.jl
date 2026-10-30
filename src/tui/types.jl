@@ -349,7 +349,9 @@ const TAB_ADVANCED   = 10
     search_layout::ResizableLayout =
         ResizableLayout(Vertical, [Fixed(6), Fixed(3), Fill()])
     search_qdrant_up::Bool = false
-    search_ollama_up::Bool = false
+    search_embedder_up::Bool = false
+    search_embedding_backend::Symbol = :ollama   # from the health check (render stays syscall-free)
+    search_embedding_where::String = ""         # the backend's address or model directory, for display
     search_model_available::Bool = false
     # Managed-Qdrant display state, refreshed by the health check so the render
     # loop doesn't do per-frame syscalls (and demos/tests can set it directly).

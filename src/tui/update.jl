@@ -256,7 +256,9 @@ function Tachikoma.update!(m::KaimonModel, evt::TaskEvent)
         first(_SEARCH_STATUS[]) == "Refreshing..." && _set_search_status!("")
         h = evt.value::NamedTuple
         m.search_qdrant_up = h.qdrant_up
-        m.search_ollama_up = h.ollama_up
+        m.search_embedder_up = h.embedder_up
+        m.search_embedding_backend = h.embedding_backend
+        m.search_embedding_where = h.embedding_where
         m.search_model_available = h.model_available
         m.search_collection_count = h.collection_count
         m.search_managed_qdrant_enabled = h.managed_qdrant_enabled
@@ -337,6 +339,20 @@ function Tachikoma.update!(m::KaimonModel, evt::TaskEvent)
         else
             _set_search_status!("Qdrant installed but failed to load (see log)")
             _push_log!(:warn, "Qdrant_jll installed but load_qdrant_jll! failed:\n$(r.output)")
+        end
+        m.search_health_last_check = 0.0
+        _refresh_search_health_async!(m)
+    elseif evt.id == :search_install_llamacpp
+        r = evt.value::NamedTuple
+        if !r.installed
+            _set_search_status!("llama.cpp install failed (see log)")
+            _push_log!(:warn, "llama_cpp_jll install failed:\n$(r.output)")
+        elseif r.loaded
+            _set_search_status!("llama.cpp installed; its server starts on first use")
+            _push_log!(:info, "llama_cpp_jll installed and loaded into the running process")
+        else
+            _set_search_status!("llama.cpp installed but failed to load (see log)")
+            _push_log!(:warn, "llama_cpp_jll installed but load_llamacpp_jll! failed:\n$(r.output)")
         end
         m.search_health_last_check = 0.0
         _refresh_search_health_async!(m)

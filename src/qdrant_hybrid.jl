@@ -416,11 +416,11 @@ function _qdrant_search_code(args)
     sem = HybridHit[]
     if want_semantic && sem_collection !== nothing
         model = something(explicit_model, resolve_search_model(sem_collection))
-        if !ping_ollama() || !check_ollama_model(model)
-            mode == "semantic" && return _require_services(need_ollama = true, model = model)
+        if !ping_embedder() || !embedding_model_available(model)
+            mode == "semantic" && return _require_services(need_embedder = true, model = model)
             push!(notes, "Embeddings unavailable (Ollama/model) — lexical results only.")
         else
-            embedding = get_ollama_embedding(query; model = model)
+            embedding = get_embedding(query; model = model)
             if isempty(embedding)
                 mode == "semantic" && return "Error: Failed to generate embedding with model '$model'."
                 push!(notes, "Embedding failed — lexical results only.")
