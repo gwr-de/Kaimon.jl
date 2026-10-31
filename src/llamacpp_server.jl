@@ -84,9 +84,11 @@ function ollama_store_model_file(model::AbstractString)
     return isfile(f) ? f : nothing
 end
 
-"Where a downloaded copy of `model` is kept."
+# Model names and tags contain hyphens; `+` is allowed in neither, so it separates the parts of a
+# downloaded file's name unambiguously.
+"Where a downloaded copy of `model` is kept: `<namespace>+<name>+<tag>.gguf`."
 downloaded_model_path(model::AbstractString) =
-    joinpath(embedding_model_dir(), join(split_model_name(model), "-") * ".gguf")
+    joinpath(embedding_model_dir(), join(split_model_name(model), "+") * ".gguf")
 
 "The GGUF file to serve `model` from: an Ollama store's copy, else a downloaded one, else `nothing`."
 function embedding_model_file(model::AbstractString)
@@ -111,9 +113,10 @@ function llamacpp_local_models()::Vector{String}
     end
     if isdir(embedding_model_dir())
         for f in readdir(embedding_model_dir())
-            m = match(r"^(.+)-([^-]+)-([^-]+)\.gguf$", f)
-            m === nothing && continue
-            ns, name, tag = m.captures
+            endswith(f, ".gguf") || continue
+            parts = split(chopsuffix(f, ".gguf"), '+')
+            length(parts) == 3 || continue
+            ns, name, tag = parts
             push!(out, (ns == "library" ? name : "$ns/$name") * ":" * tag)
         end
     end

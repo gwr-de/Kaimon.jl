@@ -34,7 +34,7 @@ end
                 @test KL.embedding_model_file("qwen3-embedding:0.6b") == blob
                 @test KL.embedding_model_file("qwen3-embedding:4b") === nothing
                 @test KL.downloaded_model_path("qwen3-embedding:4b") ==
-                      joinpath(models, "library-qwen3-embedding-4b.gguf")
+                      joinpath(models, "library+qwen3-embedding+4b.gguf")
                 write(KL.downloaded_model_path("qwen3-embedding:4b"), "GGUF")
                 @test KL.embedding_model_file("qwen3-embedding:4b") == KL.downloaded_model_path("qwen3-embedding:4b")
                 @test sort(KL.llamacpp_local_models()) == ["qwen3-embedding:0.6b", "qwen3-embedding:4b"]
