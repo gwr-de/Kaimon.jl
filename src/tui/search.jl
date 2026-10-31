@@ -97,8 +97,8 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
         elseif m.search_embedding_backend === :llamacpp
             _write_spans!(buf, x, y, [
                 ("○ ", tstyle(:error)), (rpad(embedder, 10), txt),
-                ("not installed  ", txt), ("[o]", tstyle(:warning)), (" then ", dim),
-                ("[b]", tstyle(:warning)), (" to install", dim),
+                ("not installed  ", txt), ("[o]", tstyle(:warning)), (" options, then ", dim),
+                ("[b]", tstyle(:warning)), (" install", dim),
             ])
         else
             _write_spans!(buf, x, y, [

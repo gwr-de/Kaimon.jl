@@ -1,3 +1,8 @@
+# What [b] does now: on llama.cpp that isn't installed yet it installs it, otherwise it switches.
+_backend_key_hint(m) =
+    m.search_embedding_backend === :llamacpp && !m.search_embedder_up ? " install llama.cpp" :
+    m.search_embedding_backend === :llamacpp ? " switch to Ollama" : " switch to llama.cpp"
+
 """Render the search config overlay panel."""
 function _view_search_config(m::KaimonModel, area::Rect, buf::Buffer)
     _dim_area!(buf, area)
@@ -158,7 +163,7 @@ function _view_search_config(m::KaimonModel, area::Rect, buf::Buffer)
     _write_spans!(buf, x, hint_y, [
         ("↑↓", tstyle(:accent)), (" navigate  ", tstyle(:text_dim)),
         ("Enter", tstyle(:accent)), (" select  ", tstyle(:text_dim)),
-        ("b", tstyle(:accent)), (" backend (Ollama / llama.cpp)", tstyle(:text_dim)),
+        ("b", tstyle(:accent)), (_backend_key_hint(m), tstyle(:text_dim)),
     ])
     if isempty(m.search_config_remove_confirm)
         _write_spans!(buf, x, hint_y + 1, [
