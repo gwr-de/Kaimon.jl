@@ -136,3 +136,60 @@ if !Sys.iswindows()
     end
 end
 end
+
+@testset "Codex installer: only Kaimon's tables are rewritten" begin
+    before = """
+    # Personal Codex settings
+    model_reasoning_effort = "medium"   # keep this comment
+
+    [tools]
+    web_search = true
+
+    [mcp_servers.other]
+    command = "other-server"   # another connection
+
+    """
+    kaimon = """
+    [mcp_servers.kaimon]
+    command = "npx"
+    args = ["-y", "mcp-remote", "http://localhost:2828/mcp"]
+
+    [mcp_servers.kaimon.tools.ex]
+    approval_mode = "approve"
+
+    """
+    after = """
+    [projects."/some/project"]
+    trust_level = "trusted"
+    """
+    mktempdir() do home
+        withenv("CODEX_HOME" => home, "PATH" => "") do
+            path = joinpath(home, "config.toml")
+            write(path, before * kaimon * after)
+            m = Kaimon.KaimonModel()
+            Kaimon._install_codex(m, 2829, nothing)
+            text = read(path, String)
+            @test startswith(text, before)          # comments and order before the entry kept
+            @test endswith(text, after)             # and after it
+            entry = TOML.parsefile(path)["mcp_servers"]["kaimon"]
+            @test entry["url"] == "http://localhost:2829/mcp"
+            @test !haskey(entry, "command")
+            @test entry["tools"]["ex"]["approval_mode"] == "approve"   # tool policy retained
+
+            Kaimon._remove_codex(m)
+            @test read(path, String) == before * after
+        end
+    end
+
+    # An entry written inline cannot be replaced table by table; the whole file is rewritten instead.
+    mktempdir() do home
+        withenv("CODEX_HOME" => home, "PATH" => "") do
+            path = joinpath(home, "config.toml")
+            write(path, "mcp_servers = { kaimon = { command = \"npx\" }, other = { command = \"x\" } }\n")
+            Kaimon._install_codex(Kaimon.KaimonModel(), 2828, nothing)
+            servers = TOML.parsefile(path)["mcp_servers"]
+            @test servers["kaimon"]["url"] == "http://localhost:2828/mcp"
+            @test servers["other"]["command"] == "x"
+        end
+    end
+end

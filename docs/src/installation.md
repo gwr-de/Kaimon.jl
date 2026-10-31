@@ -92,8 +92,9 @@ the extension after configuring it. The installer does not require `npx`,
 
 An existing `kaimon` entry is reused regardless of capitalization, and an old
 `mcp-remote` entry is migrated to HTTP. Other servers, global settings, and the
-Codex login are preserved. The file is reserialized as TOML, so comments and
-formatting may change. The installer retains Kaimon's tool policies, timeouts,
+Codex login are preserved. Only Kaimon's own server table is rewritten; the rest
+of the file, comments included, is left as it was. (If that entry is written inline
+rather than as its own table, the whole file is reserialized.) The installer retains Kaimon's tool policies, timeouts,
 and custom headers, and updates its endpoint and authentication to match the
 running Kaimon server. Removal deletes only that server entry and leaves login
 and shared environment files intact.

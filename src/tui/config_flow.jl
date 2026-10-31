@@ -622,7 +622,7 @@ function _remove_codex(m::KaimonModel)
         name = _codex_kaimon_name(servers)
         if haskey(servers, name)
             delete!(servers, name)
-            _write_codex_config(path, config)
+            _write_codex_config(path, config; server = name)
         end
     end
     m.flow_message = "Removed Kaimon from Codex CLI / VS Code\n$(_short_path(path))\nRestart Codex to apply."
@@ -892,9 +892,84 @@ function _codex_kaimon_name(servers::AbstractDict)
     isempty(names) ? "kaimon" : only(names)
 end
 
-"Write a complete, validated TOML document atomically; it may contain an API key."
-function _write_codex_config(path::String, config::AbstractDict)
-    content = sprint(io -> TOML.print(io, config; sorted = true))
+"The key path of a TOML table header (`a.\"b\".c` → `[\"a\", \"b\", \"c\"]`), or `nothing`."
+function _toml_header_path(inner::AbstractString)
+    d = TOML.tryparse("[" * inner * "]")
+    d isa AbstractDict || return nothing
+    path = String[]
+    while d isa AbstractDict && length(d) == 1
+        k, d = only(d)
+        push!(path, String(k))
+    end
+    return path
+end
+
+"""
+Rewrite only the `[mcp_servers.<name>]` tables (and their sub-tables) of a Codex config: `entry`
+replaces them, or they are removed when it is `nothing`. Every other line is kept as it was. The
+caller checks the result parses to the intended config, and rewrites the whole file otherwise.
+"""
+function _codex_splice_server(text::AbstractString, name::AbstractString, entry)
+    lines = split(text, '\n')
+    starts, paths = Int[], Any[]
+    for (i, l) in enumerate(lines)
+        s = strip(l)
+        if startswith(s, "[[")
+            push!(starts, i); push!(paths, nothing)
+        elseif (m = match(r"^\[\s*(.+?)\s*\]\s*(#.*)?$", s)) !== nothing
+            push!(starts, i); push!(paths, _toml_header_path(m.captures[1]))
+        end
+    end
+    own = [k for k in eachindex(starts) if paths[k] isa Vector && length(paths[k]) >= 2 &&
+           paths[k][1] == "mcp_servers" && paths[k][2] == name]
+    keep = trues(length(lines))
+    for k in own
+        keep[starts[k]:(k < length(starts) ? starts[k+1] - 1 : length(lines))] .= false
+    end
+    block = String[]
+    if entry !== nothing
+        t = sprint(io -> TOML.print(io, Dict("mcp_servers" => Dict(String(name) => entry)); sorted = true))
+        block = [String(l) for l in split(strip(t, '\n'), '\n') if strip(l) != "[mcp_servers]"]
+        while !isempty(block) && isempty(strip(first(block)))
+            popfirst!(block)
+        end
+        push!(block, "")
+    end
+    out = String[]
+    at = isempty(own) ? 0 : starts[first(own)]
+    for (i, l) in enumerate(lines)
+        i == at && append!(out, block)
+        keep[i] && push!(out, String(l))
+    end
+    if at == 0 && !isempty(block)   # a new entry goes at the end, after one blank line
+        while !isempty(out) && isempty(strip(last(out)))
+            pop!(out)
+        end
+        isempty(out) || push!(out, "")
+        append!(out, block)
+    end
+    return join(out, "\n")
+end
+
+_codex_without_empty_servers(d) =
+    isempty(get(d, "mcp_servers", ())) ? filter(p -> p.first != "mcp_servers", d) : d
+
+"""
+Write the Codex config atomically; it may contain an API key. With `server`, only that server's
+tables are rewritten, keeping the rest of the file (comments, order, formatting) as it was. The
+whole file is reserialized only when that edit would not parse to exactly `config`, e.g. when the
+server is written inline.
+"""
+function _write_codex_config(path::String, config::AbstractDict; server = nothing)
+    content = lstrip(sprint(io -> TOML.print(io, config; sorted = true)), '\n')
+    if server !== nothing && isfile(path)
+        entry = get(get(config, "mcp_servers", Dict{String,Any}()), server, nothing)
+        spliced = _codex_splice_server(read(path, String), server, entry)
+        parsed = TOML.tryparse(spliced)
+        parsed isa AbstractDict &&
+            _codex_without_empty_servers(parsed) == _codex_without_empty_servers(config) &&
+            (content = spliced)
+    end
     TOML.parse(content)
     # Keep an existing config symlink intact (e.g. a shared/dotfiles configuration).
     target = islink(path) ? realpath(path) : path
@@ -935,7 +1010,7 @@ function _install_codex(m::KaimonModel, port::Int, api_key)
     end
     entry["url"] = "http://localhost:$port/mcp"
     entry["enabled"] = true
-    _write_codex_config(path, config)
+    _write_codex_config(path, config; server = name)
     m.flow_message = "Configured Kaimon for Codex CLI / VS Code\n$(_short_path(path))\nRestart Codex to apply."
     m.flow_success = true
 end
