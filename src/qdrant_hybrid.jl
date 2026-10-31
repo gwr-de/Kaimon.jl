@@ -418,7 +418,7 @@ function _qdrant_search_code(args)
         model = something(explicit_model, resolve_search_model(sem_collection))
         if !ping_embedder() || !embedding_model_available(model)
             mode == "semantic" && return _require_services(need_embedder = true, model = model)
-            push!(notes, "Embeddings unavailable (Ollama/model) — lexical results only.")
+            push!(notes, "Embeddings unavailable ($(embedder_name()) has no '$model') — lexical results only.")
         else
             embedding = get_embedding(query; model = model)
             if isempty(embedding)
