@@ -64,12 +64,14 @@ end
 # Extensible PDF text extraction — implemented by KaimonPDFIOExt when PDFIO is loaded.
 function _extract_pdf_text end
 
-# Embedding model configuration
+# Embedding model configuration. `context_chars` is the longest text sent for one embedding; a
+# longer chunk is split. The time and memory an embedding takes grow with the square of its length,
+# so this sits well under what the model accepts, which keeps one embedding to seconds on a CPU.
 const EMBEDDING_CONFIGS = Dict(
     "embeddinggemma:latest" => (dims=768, context_tokens=2048, context_chars=4000),
-    "qwen3-embedding:0.6b" => (dims=1024, context_tokens=8192, context_chars=16000),
-    "qwen3-embedding:4b" => (dims=2560, context_tokens=8192, context_chars=16000),
-    "qwen3-embedding:8b" => (dims=4096, context_tokens=8192, context_chars=16000),
+    "qwen3-embedding:0.6b" => (dims=1024, context_tokens=8192, context_chars=4000),
+    "qwen3-embedding:4b" => (dims=2560, context_tokens=8192, context_chars=4000),
+    "qwen3-embedding:8b" => (dims=4096, context_tokens=8192, context_chars=4000),
     "snowflake-arctic-embed:latest" => (dims=1024, context_tokens=512, context_chars=1000),
     "nomic-embed-text" => (dims=768, context_tokens=512, context_chars=1000),
 )

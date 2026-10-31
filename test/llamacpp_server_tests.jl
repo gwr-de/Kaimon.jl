@@ -51,6 +51,11 @@ end
         @test args[findfirst(==("--api-key"), args) + 1] == "k789"
         @test "--embeddings" in args
         @test !("--pooling" in args)
+        @test args[findfirst(==("-ub"), args) + 1] == string(KL.LLAMACPP_BATCH)
+        # The longest text sent fits one batch even at two characters to a token.
+        for (name, cfg) in KL.EMBEDDING_CONFIGS
+            startswith(name, "qwen3-embedding") && @test cfg.context_chars ÷ 2 <= KL.LLAMACPP_BATCH
+        end
         @test occursin(gethostname(), KL.llamacpp_record_path("qwen3-embedding:0.6b"))
         @test !occursin(':', basename(KL.llamacpp_record_path("qwen3-embedding:0.6b")))
     end

@@ -249,11 +249,16 @@ function _llamacpp_ok(port::Integer, key::AbstractString)::Bool
     end
 end
 
+# llama.cpp embeds an input in one batch, so the batch is the longest input in tokens. Kaimon sends
+# at most `context_chars` characters (4,000), and code runs about 2.5 characters to a token, so this
+# leaves room for dense text. The server's memory grows with it.
+const LLAMACPP_BATCH = 4096
+
 "The arguments `llama-server` is started with. Pooling comes from the model file, as in Ollama."
 llamacpp_server_args(file::AbstractString, port::Integer, key::AbstractString; threads::Integer = llamacpp_threads()) =
     ["-m", String(file), "--embeddings", "--host", "127.0.0.1", "--port", string(port),
-     "--api-key", String(key), "-c", "8192", "-b", "8192", "-ub", "8192",
-     "-t", string(threads), "-ngl", "99"]
+     "--api-key", String(key), "-c", string(LLAMACPP_BATCH), "-b", string(LLAMACPP_BATCH),
+     "-ub", string(LLAMACPP_BATCH), "-t", string(threads), "-ngl", "99"]
 
 """
     ensure_llamacpp!(model; timeout=120) -> Union{Tuple{String,String},Nothing}
