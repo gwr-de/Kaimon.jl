@@ -28,7 +28,7 @@ llamacpp_service_env() = mkpath(joinpath(kaimon_cache_dir(), "service-env-llamac
 function llamacpp_install_command()::Cmd
     env = llamacpp_service_env()
     code = "import Pkg; Pkg.activate(raw\"$env\"); Pkg.add(Pkg.PackageSpec(name=\"llama_cpp_jll\"))"
-    return `$(Base.julia_cmd()) --startup-file=no --color=no -e $code`
+    return service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no --color=no -e $code`)
 end
 
 "True if `llama_cpp_jll` is installed in its service environment (or already loaded)."
@@ -143,7 +143,7 @@ function download_embedding_model!(model::AbstractString)::String
     tmp = dest * ".part"
     url = "$OLLAMA_REGISTRY/v2/$ns/$name/blobs/$digest"
     code = "using Downloads; Downloads.download(ARGS[1], ARGS[2])"
-    run(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`)
+    run(service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`))
     got = "sha256:" * bytes2hex(open(SHA.sha256, tmp))
     if got != digest
         rm(tmp; force = true)

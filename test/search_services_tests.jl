@@ -94,6 +94,17 @@ end
         end
     end
 
+    @testset "install and download subprocesses get Julia's default load path" begin
+        # The kaimon launcher sets JULIA_LOAD_PATH to the Kaimon checkout alone; a child that
+        # inherited it could load neither the env it activates nor the standard library.
+        withenv("JULIA_LOAD_PATH" => "/only/the/kaimon/checkout") do
+            for cmd in (KS.llamacpp_install_command(), KS.qdrant_install_command())
+                lp = only(filter(startswith("JULIA_LOAD_PATH="), cmd.env))
+                @test occursin("@stdlib", lp) && !occursin("/only/the/kaimon/checkout", lp)
+            end
+        end
+    end
+
     @testset "service keys are random and long" begin
         a, b = KS.new_service_key(), KS.new_service_key()
         @test a != b && length(a) == 48 && all(isxdigit, a)

@@ -86,6 +86,18 @@ embedding_model_dir()::String =
     abspath(expanduser(String(search_setting("embedding", "model_dir", "KAIMON_MODEL_DIR",
                                              joinpath(kaimon_cache_dir(), "models")))))
 
+# ── Subprocesses ──────────────────────────────────────────────────────────────
+
+"""
+    service_julia_cmd(cmd) -> Cmd
+
+`cmd` (a Julia subprocess that installs or downloads for a service) with Julia's default load path.
+The `kaimon` app launcher sets `JULIA_LOAD_PATH` to the Kaimon checkout alone, which a child would
+inherit: it could then load neither the environment it activates nor the standard library.
+"""
+service_julia_cmd(cmd::Cmd) =
+    addenv(cmd, "JULIA_LOAD_PATH" => join(("@", "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':'))
+
 # ── Ports ─────────────────────────────────────────────────────────────────────
 
 _service_user() = get(ENV, "USER", get(ENV, "USERNAME", string(Sys.isunix() ? ccall(:getuid, Cuint, ()) : 0)))

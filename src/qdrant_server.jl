@@ -151,7 +151,7 @@ function qdrant_install_command()::Cmd
     # future bumps automatically). `_QDRANT_JLL_MIN` documents the floor we've tested.
     code = "import Pkg; Pkg.activate(raw\"$env\"); " *
            "Pkg.add(Pkg.PackageSpec(name=\"Qdrant_jll\"))"
-    return `$(Base.julia_cmd()) --startup-file=no --color=no -e $code`
+    return service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no --color=no -e $code`)
 end
 
 """True if the Qdrant binary is installed in the service env (or already loaded)."""
