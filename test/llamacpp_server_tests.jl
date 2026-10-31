@@ -55,6 +55,23 @@ end
         @test !occursin(':', basename(KL.llamacpp_record_path("qwen3-embedding:0.6b")))
     end
 
+    @testset "a configured llama-server replaces the JLL's" begin
+        d = mktempdir()
+        try
+            bin = joinpath(d, "llama-server"); write(bin, "#!/bin/sh\n")
+            withenv("KAIMON_LLAMACPP_SERVER" => bin, "KAIMON_CACHE_DIR" => mktempdir()) do
+                @test KL.llamacpp_installed()                     # no JLL needed
+                @test KL.llamacpp_server_cmd() == Cmd([bin])
+            end
+            withenv("KAIMON_LLAMACPP_SERVER" => joinpath(d, "missing"), "KAIMON_CACHE_DIR" => mktempdir()) do
+                @test !KL.llamacpp_installed()
+                @test (@test_logs (:warn,) KL.llamacpp_server_cmd()) === nothing
+            end
+        finally
+            rm(d; recursive = true, force = true)
+        end
+    end
+
     @testset "not installed: nothing is started" begin
         withenv("KAIMON_CACHE_DIR" => mktempdir()) do
             @test !KL.llamacpp_installed()

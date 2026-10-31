@@ -31,8 +31,37 @@ function llamacpp_install_command()::Cmd
     return service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no --color=no -e $code`)
 end
 
-"True if `llama_cpp_jll` is installed in its service environment (or already loaded)."
+"""
+A `llama-server` binary to run instead of `llama_cpp_jll`'s — one built for this machine's CPU, or
+with CUDA. Kaimon runs it exactly as it runs the JLL's, and the JLL need not be installed. Empty
+means the JLL's.
+"""
+llamacpp_server_setting()::String =
+    String(search_setting("embedding", "llamacpp_server", "KAIMON_LLAMACPP_SERVER", ""))
+
+_llamacpp_custom_server() = (p = llamacpp_server_setting(); isempty(p) ? nothing : abspath(expanduser(p)))
+
+"""
+    llamacpp_server_cmd() -> Union{Cmd,Nothing}
+
+The `llama-server` to start: the configured binary when `embedding.llamacpp_server` is set, else
+`llama_cpp_jll`'s (loaded on demand). `nothing` when neither is available.
+"""
+function llamacpp_server_cmd()
+    custom = _llamacpp_custom_server()
+    if custom !== nothing
+        isfile(custom) && return Cmd([custom])
+        @warn "embedding.llamacpp_server names a file that does not exist" path = custom
+        return nothing
+    end
+    load_llamacpp_jll!() || return nothing
+    return Base.invokelatest(_LLAMACPP_JLL_MOD[].llama_server)::Cmd
+end
+
+"True if a `llama-server` is available: a configured one, or `llama_cpp_jll` installed in its service environment."
 function llamacpp_installed()::Bool
+    custom = _llamacpp_custom_server()
+    custom === nothing || return isfile(custom)
     _LLAMACPP_JLL_MOD[] !== nothing && return true
     manifest = joinpath(llamacpp_service_env(), "Manifest.toml")
     return isfile(manifest) && occursin("llama_cpp_jll", read(manifest, String))
@@ -246,7 +275,8 @@ function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
         if r !== nothing && r.host == gethostname() && !_pid_alive(r.pid)
             @warn "The llama.cpp server for '$model' has exited; starting a new one" log = llamacpp_log_path(model)
         end
-        load_llamacpp_jll!() || return nothing
+        exe = llamacpp_server_cmd()
+        exe === nothing && return nothing
         file = embedding_model_file(model)
         if file === nothing
             @warn "No model file for '$model': pull it (the [p] key on the Search tab) or put it in $(embedding_model_dir())"
@@ -261,8 +291,6 @@ function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
         end
         key = new_service_key()
         log = llamacpp_log_path(model)
-        mod = _LLAMACPP_JLL_MOD[]
-        exe = Base.invokelatest(mod.llama_server)::Cmd
         cmd = `$exe $(llamacpp_server_args(file, port, key))`
         @info "Starting llama.cpp embedding server" model port log
         logio = open_service_log(log)
