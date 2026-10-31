@@ -166,7 +166,8 @@ const _SCHEMA = String[
         eval_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, code TEXT NOT NULL,
         started_at REAL NOT NULL, finished_at REAL DEFAULT 0.0, promoted_at REAL NOT NULL,
         status TEXT NOT NULL DEFAULT 'running', result TEXT DEFAULT '',
-        result_preview TEXT DEFAULT '', cancelled INTEGER DEFAULT 0)""",
+        result_preview TEXT DEFAULT '', cancelled INTEGER DEFAULT 0,
+        cancel_requested_at REAL DEFAULT 0.0)""",
     "CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status)",
 ]
 
@@ -190,6 +191,7 @@ function _init_db_impl!(db_path::String)
         # `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so columns added
         # after a DB was first created have to be applied separately.
         _ensure_column!(db, "test_runs", "coverage", "INTEGER DEFAULT 0")
+        _ensure_column!(db, "background_jobs", "cancel_requested_at", "REAL DEFAULT 0.0")
         db
     end
 end
@@ -420,7 +422,7 @@ end
 """Update a background job's status/result (only the provided fields)."""
 function update_job!(eval_id::String; status::String = "", result::String = "",
                      result_preview::String = "", finished_at::Float64 = 0.0,
-                     cancelled::Bool = false)
+                     cancelled::Bool = false, cancel_requested_at::Float64 = 0.0)
     sets = String[]
     vals = Any[]
     isempty(status) || (push!(sets, "status = ?"); push!(vals, status))
@@ -428,6 +430,7 @@ function update_job!(eval_id::String; status::String = "", result::String = "",
     isempty(result_preview) || (push!(sets, "result_preview = ?"); push!(vals, first(result_preview, 500)))
     finished_at > 0.0 && (push!(sets, "finished_at = ?"); push!(vals, finished_at))
     cancelled && push!(sets, "cancelled = 1")
+    cancel_requested_at > 0.0 && (push!(sets, "cancel_requested_at = ?"); push!(vals, cancel_requested_at))
     isempty(sets) && return
     push!(vals, eval_id)
     try
@@ -470,7 +473,7 @@ function get_job_stats()
                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-                   SUM(CASE WHEN cancelled = 1 THEN 1 ELSE 0 END) as cancelled,
+                   SUM(CASE WHEN cancelled = 1 AND finished_at > 0 THEN 1 ELSE 0 END) as cancelled,
                    AVG(CASE WHEN finished_at > 0 THEN finished_at - started_at END) as avg_duration,
                    MAX(CASE WHEN finished_at > 0 THEN finished_at - started_at END) as max_duration
                FROM background_jobs""")

@@ -179,6 +179,7 @@ function _record_eval_start!(mgr::ConnectionManager, eval_id::String, session_ke
         first(code, 500),
         time(),
         0.0,
+        0.0,      # cancel_requested_at
         time(),   # last_update
         :running,
         "",
@@ -214,4 +215,21 @@ function _record_eval_done!(mgr::ConnectionManager, eval_id::String, status::Sym
     end
     return nothing
 end
+
+"""True when `cancel_eval` was requested for `eval_id` and the job has not stopped yet."""
+function _cancel_requested(mgr, eval_id::String)
+    mgr === nothing && return false
+    return lock(mgr.eval_history_lock) do
+        for r in mgr.eval_history
+            r.eval_id == eval_id && return r.cancel_requested_at > 0.0
+        end
+        false
+    end
+end
+
+"""Terminal status once a job has stopped: a pending cancel request wins over
+completed/failed, so the DB records `cancelled` (with its result) only when the
+code actually stops."""
+_job_terminal_status(mgr, eval_id::String, threw::Bool) =
+    _cancel_requested(mgr, eval_id) ? :cancelled : (threw ? :failed : :completed)
 

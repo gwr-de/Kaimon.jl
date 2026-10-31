@@ -20,7 +20,8 @@ complete faster if you check more often — you are just wasting tokens.
 A good pattern: check once after 30s, then every 60s after that.
 
 Returns status (running/completed/failed), elapsed time, stashed values,
-and the result if completed.""",
+and the result if completed. A running job shows "cancel requested Ns ago"
+after cancel_eval has been called, until its code actually stops.""",
     Dict(
         "type" => "object",
         "properties" => Dict(
@@ -57,6 +58,11 @@ and the result if completed.""",
                 finished = get(db_job, "finished_at", 0.0)
                 elapsed_str = _fmt_elapsed(finished > 0 ? finished - started : time() - started)
                 out = "$eval_id $status $(elapsed_str)\n$(first(code, 80))"
+                if status == "running" && isequal(get(db_job, "cancelled", 0), 1)
+                    req_at = get(db_job, "cancel_requested_at", 0.0)
+                    req_at isa Real && req_at > 0 &&
+                        (out *= "\n(cancel requested $(max(0, round(Int, time() - req_at)))s ago)")
+                end
                 !isempty(result) && (out *= "\n\n$result")
                 !isempty(result) || !isempty(result_preview) && (out *= "\n\n$result_preview")
                 return out
@@ -75,6 +81,12 @@ and the result if completed.""",
             ago = round(Int, time() - record.last_update)
             status_line *= ", last activity $(ago)s ago"
         end
+        # A cancel request does not end the job: say the request is pending so a
+        # still-running job is not mistaken for a stopped one.
+        if display_status == :running && record.cancel_requested_at > 0.0
+            req_ago = max(0, round(Int, time() - record.cancel_requested_at))
+            status_line *= ", cancel requested $(req_ago)s ago"
+        end
         parts = ["$(record.eval_id) on $(record.session_key)", status_line]
 
         # Stash summary (compact: key=value pairs on one line)
@@ -84,7 +96,7 @@ and the result if completed.""",
         end
 
         # Result — only for completed/failed jobs
-        if record.promoted && record.status in (:completed, :failed) && !isempty(record.full_result)
+        if record.promoted && record.status in (:completed, :failed, :cancelled) && !isempty(record.full_result)
             push!(parts, record.full_result)
         elseif !isempty(record.result_preview)
             push!(parts, record.result_preview)
@@ -98,7 +110,9 @@ cancel_eval_tool = @mcp_tool(
     :cancel_eval,
     """Cancel a running background job by eval ID.
 
-Sends a cancellation signal to the gate session and marks the job in the database.
+Sends a cancellation signal to the gate session and records the request (the
+job keeps running until its code stops; the database records it as cancelled
+with its result at that point).
 Running code that calls `KaimonGate.is_cancelled()` in its loop will stop cooperatively.
 Julia doesn't support forced thread interruption, so cancellation is cooperative —
 the running code must check `KaimonGate.is_cancelled()` periodically.""",
@@ -116,38 +130,81 @@ the running code must check `KaimonGate.is_cancelled()` periodically.""",
         eval_id = get(args, "eval_id", "")
         isempty(eval_id) && return "Error: eval_id is required."
 
-        # Find the session key and notify the gate process
-        session_key = ""
+        # Resolve the typed id (a prefix is allowed) to the FULL id of exactly
+        # one running job — the :cancel_job request and the DB update are both
+        # keyed by it, so a short prefix must not be forwarded as typed.
         mgr = GATE_CONN_MGR[]
+        matches = String[]
+        session_key = ""
+        full_id = ""
+        requested_at = time()
         if mgr !== nothing
             lock(mgr.eval_history_lock) do
                 for r in mgr.eval_history
-                    if startswith(r.eval_id, eval_id) && r.status in (:running, :promoted)
-                        r.status = :cancelled
-                        r.finished_at = time()
-                        session_key = r.session_key
-                    end
+                    startswith(r.eval_id, eval_id) && r.status in (:running, :promoted) &&
+                        push!(matches, r.eval_id)
                 end
-            end
-
-            # Send cancel to the gate session so KaimonGate.is_cancelled() returns true
-            if !isempty(session_key)
-                conn = get_connection_by_key(mgr, session_key)
-                if conn !== nothing
-                    try
-                        _req_send_recv(conn,
-                            (type = :cancel_job, eval_id = eval_id);
-                            caller_timeout = 5.0)
-                    catch
+                if length(matches) == 1
+                    for r in mgr.eval_history
+                        if r.eval_id == matches[1]
+                            r.cancel_requested_at = requested_at
+                            session_key = r.session_key
+                            break
+                        end
                     end
                 end
             end
         end
+        if length(matches) > 1
+            return "Error: '$(eval_id)' matches $(length(matches)) running jobs " *
+                   "($(join(matches, ", "))); use a longer id."
+        end
 
-        # Update database
-        Database.update_job!(eval_id; status="cancelled", cancelled=true, finished_at=time())
+        if length(matches) == 1
+            full_id = matches[1]
+        else
+            # Not running in this session's history: the job may belong to a
+            # previous one. Only a row still marked 'running' can be cancelled —
+            # never re-stamp a completed/failed/cancelled/lost job — and an
+            # ambiguous prefix is refused here too.
+            running_rows = filter(j -> startswith(string(get(j, "eval_id", "")), eval_id),
+                                  Database.list_jobs(; status = "running", limit = 50))
+            if length(running_rows) > 1
+                ids = join([string(get(j, "eval_id", "")) for j in running_rows], ", ")
+                return "Error: '$(eval_id)' matches $(length(running_rows)) running jobs " *
+                       "($(ids)); use a longer id."
+            end
+            if length(running_rows) == 1
+                full_id = string(get(running_rows[1], "eval_id", eval_id))
+                session_key = string(get(running_rows[1], "session_key", ""))
+            else
+                job = Database.get_job(eval_id)
+                job === nothing && return "No running job matching '$(eval_id)'."
+                return "Job $(get(job, "eval_id", eval_id)) already $(string(get(job, "status", "")))."
+            end
+        end
 
-        "Job $eval_id marked as cancelled. Running code can check KaimonGate.is_cancelled() to stop cooperatively."
+        # Send cancel to the gate session so KaimonGate.is_cancelled() returns
+        # true — cancel_job! is keyed by the full request id.
+        if mgr !== nothing && !isempty(session_key)
+            conn = get_connection_by_key(mgr, session_key)
+            if conn !== nothing
+                try
+                    _req_send_recv(conn,
+                        (type = :cancel_job, eval_id = full_id);
+                        caller_timeout = 5.0)
+                catch
+                end
+            end
+        end
+
+        # Mark the request, not a result: the job keeps status 'running' (so the
+        # restart reconciliation still finds it) and stays un-finished until the
+        # code actually stops — the collector then records 'cancelled' with the
+        # result. `cancelled` + `cancel_requested_at` carry the request itself.
+        Database.update_job!(full_id; cancelled=true, cancel_requested_at=requested_at)
+
+        "Cancellation requested for $full_id. Running code can check KaimonGate.is_cancelled() to stop cooperatively; the job is recorded as cancelled once it actually stops."
     end
 )
 
