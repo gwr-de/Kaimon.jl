@@ -663,7 +663,8 @@ qdrant_index_project_tool = @mcp_tool(
         "required" => [],
     ),
     function (args)
-        err = _require_services(need_embedder = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         project_path = get(args, "project_path", pwd())
@@ -727,7 +728,8 @@ qdrant_sync_index_tool = @mcp_tool(
         "required" => [],
     ),
     function (args)
-        err = _require_services(need_embedder = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         project_path = get(args, "project_path", pwd())
@@ -776,7 +778,8 @@ qdrant_reindex_file_tool = @mcp_tool(
         "required" => ["file_path", "collection"],
     ),
     function (args)
-        err = _require_services(need_embedder = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         file_path = get(args, "file_path", "")
