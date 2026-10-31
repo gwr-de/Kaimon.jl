@@ -30,114 +30,28 @@ Return the current Qdrant collection prefix (empty string if none).
 """
 get_collection_prefix() = _QDRANT_COLLECTION_PREFIX[]
 
-"""Name of the global cross-project collection."""
-function global_collection_name()
-    _prefixed("kaimon_all")
-end
+# Cross-project search queries the project collections themselves (see `search_code`), so no
+# vector is stored twice. Older versions kept a merged copy of every project in one collection;
+# this is its name, so it can be skipped where collections are enumerated and removed.
+"""Name of the merged cross-project collection older versions kept."""
+global_collection_name() = _prefixed("kaimon_all")
 
-const _GLOBAL_COLLECTION_ENSURED = Ref{Bool}(false)
+"""
+    drop_legacy_global_collection!() -> Bool
 
-"""Ensure the global cross-project collection exists, creating it if needed."""
-function _ensure_global_collection!()
-    _GLOBAL_COLLECTION_ENSURED[] && return
-    gc_name = global_collection_name()
+Delete the merged cross-project collection older versions kept: a copy of vectors the project
+collections already hold. True if there was one.
+"""
+function drop_legacy_global_collection!()::Bool
+    gc = global_collection_name()
     try
-        existing = QdrantClient.list_collections()
-        if gc_name ∉ existing
-            # Use the same dimensions as the default embedding model
-            cfg = get_embedding_config(DEFAULT_EMBEDDING_MODEL)
-            QdrantClient.create_collection(gc_name; vector_size=cfg.dims)
-        end
-        _GLOBAL_COLLECTION_ENSURED[] = true
-    catch e
-        @debug "Failed to ensure global collection" exception=e
-        _GLOBAL_COLLECTION_ENSURED[] = false
-    end
-end
-
-"""Upsert points to the global cross-project collection (best-effort)."""
-function _upsert_to_global!(points::Vector{Dict})
-    isempty(points) && return
-    try
-        _ensure_global_collection!()
-        QdrantClient.upsert_points(global_collection_name(), points)
+        QdrantClient.collection_exists(gc) || return false
+        QdrantClient.delete_collection(gc)
+        with_index_logger(() -> @info "Removed the merged cross-project collection; search queries project collections directly" collection = gc)
+        return true
     catch
-        # Don't fail the primary index if global write fails
+        return false
     end
-end
-
-"""
-    populate_global_collection!(; verbose=true)
-
-One-time migration: copy all vectors from per-project collections into the
-global cross-project collection. Safe to run multiple times — uses upsert
-so duplicates are overwritten.
-"""
-function populate_global_collection!(; verbose::Bool=true)
-    _ensure_global_collection!()
-    gc_name = global_collection_name()
-    collections = QdrantClient.list_collections()
-    total = 0
-    for col in collections
-        col == gc_name && continue
-
-        # Validate this is a Kaimon-indexed collection by sampling a point
-        # and checking for our schema fields. Skip foreign collections.
-        is_kaimon = try
-            # Sample a point and check for Kaimon payload fields
-            sample = QdrantClient.scroll_points(col; limit=1)
-            points = get(sample, "points", [])
-            if !isempty(points)
-                payload = get(first(points), "payload", Dict())
-                haskey(payload, "file") && haskey(payload, "type") && haskey(payload, "text")
-            else
-                false
-            end
-        catch
-            false
-        end
-        if !is_kaimon
-            verbose && println("  Skipping $col (not a Kaimon index)")
-            continue
-        end
-
-        verbose && print("  Copying $col... ")
-        try
-            # Scroll through all points in the collection with vectors
-            offset = nothing
-            col_count = 0
-            while true
-                result = QdrantClient.scroll_points(col; limit=100, offset=offset, with_vector=true)
-                points = get(result, "points", [])
-                isempty(points) && break
-                # Convert scroll result points to upsert format
-                upsert_batch = Dict[]
-                for pt in points
-                    id = get(pt, "id", nothing)
-                    vector = get(pt, "vector", nothing)
-                    payload = get(pt, "payload", Dict())
-                    (id === nothing || vector === nothing) && continue
-                    push!(upsert_batch, Dict(
-                        "id" => id,
-                        "vector" => vector,
-                        "payload" => payload,
-                    ))
-                end
-                !isempty(upsert_batch) && QdrantClient.upsert_points(gc_name, upsert_batch)
-                col_count += length(upsert_batch)
-                # Get next offset
-                next_offset = get(result, "next_page_offset", nothing)
-                next_offset === nothing && break
-                offset = next_offset
-            end
-            verbose && println("$col_count vectors")
-            total += col_count
-        catch e
-            verbose && println("failed: $(sprint(showerror, e))")
-        end
-    end
-    verbose && println("✅ Global collection populated: $total vectors from $(length(collections)-1) collections")
-    return total
 end
 
 """Apply the collection prefix to a name, if configured."""

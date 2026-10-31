@@ -122,6 +122,17 @@ end
         end
     end
 
+    @testset "cross-project search groups Kaimon's collections by model" begin
+        models = Dict("a" => "m4b", "b" => "m4b", "c" => "m06b", "kaimon_all" => "m06b")
+        g = KS._cross_project_groups(["a", "b", "c", "foreign", "kaimon_all"], models, nothing;
+                                     legacy = "kaimon_all")
+        @test sort(collect(keys(g))) == ["m06b", "m4b"]
+        @test sort(g["m4b"]) == ["a", "b"] && g["m06b"] == ["c"]   # no foreign or merged collection
+        # An explicit model only reaches collections built with it.
+        @test KS._cross_project_groups(["a", "b", "c"], models, "m06b"; legacy = "kaimon_all") ==
+              Dict("m06b" => ["c"])
+    end
+
     @testset "service keys are random and long" begin
         a, b = KS.new_service_key(), KS.new_service_key()
         @test a != b && length(a) == 48 && all(isxdigit, a)
