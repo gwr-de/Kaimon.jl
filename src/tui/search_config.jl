@@ -249,15 +249,23 @@ function _pull_embedding_model_async!(
     m::KaimonModel;
     model::String = m.search_embedding_model,
 )
+    if _MODEL_PULL[] !== nothing
+        _set_search_status!("Already pulling '$(_MODEL_PULL[].model)'")
+        return
+    end
+    started = time()
     if m.search_embedding_backend === :llamacpp
-        _set_search_status!("Downloading model '$model'...")
+        _set_model_pull!((model = model, started, done = 0, total = 0))
         _push_log!(:info, "Downloading '$model' from Ollama's registry into $(embedding_model_dir())")
         spawn_task!(m._task_queue, :search_pull_model) do
             try
-                download_embedding_model!(model)
+                download_embedding_model!(model;
+                    progress = (d, t) -> _set_model_pull!((model = model, started, done = d, total = t)))
                 (success = true, model = model, status = "success")
             catch e
                 (success = false, model = model, status = sprint(showerror, e))
+            finally
+                _set_model_pull!(nothing)
             end
         end
         return
@@ -266,7 +274,7 @@ function _pull_embedding_model_async!(
         _set_search_status!("Cannot pull: Ollama not running")
         return
     end
-    _set_search_status!("Pulling model '$model'...")
+    _set_model_pull!((model = model, started, done = 0, total = 0))
     _push_log!(:info, "Pulling model '$model' via Ollama...")
     spawn_task!(m._task_queue, :search_pull_model) do
         try
@@ -282,6 +290,8 @@ function _pull_embedding_model_async!(
             (success = status == "success", model = model, status = status)
         catch e
             (success = false, model = model, status = sprint(showerror, e))
+        finally
+            _set_model_pull!(nothing)
         end
     end
 end
@@ -457,7 +467,7 @@ function _open_search_config!(m::KaimonModel)
                 dims = EMBEDDING_CONFIGS[n].dims,
                 ctx = EMBEDDING_CONFIGS[n].context_tokens,
                 installed = any(
-                    im -> im == n || startswith(im, split(n, ":")[1]),
+                    im -> _model_matches(im, n),
                     installed_models,
                 ),
             ) for n in model_names

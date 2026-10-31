@@ -158,6 +158,11 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
         ])
         y += 1
     end
+    _pull = _model_pull_text()
+    if !isempty(_pull)
+        _write_spans!(buf, x, y, [("⟳ ", tstyle(:accent)), (_pull, tstyle(:accent))])
+        y += 1
+    end
     _status = _get_search_status()
     if !isempty(_status)
         _style = contains(_status, "Cannot") || contains(_status, "failed") ||
@@ -527,6 +532,20 @@ function _handle_collection_picker_key!(m::KaimonModel, evt::KeyEvent)
             end
         end
     end
+end
+
+# ── A model pull or download in flight ──
+# Shown until it ends, unlike the status line, which clears after a few seconds. The pulling task
+# updates it; rendering only reads it.
+const _MODEL_PULL = Ref{Any}(nothing)   # (model, started, done, total) or nothing
+_set_model_pull!(p) = (_MODEL_PULL[] = p; nothing)
+function _model_pull_text()
+    p = _MODEL_PULL[]
+    p === nothing && return ""
+    el = round(Int, time() - p.started)
+    mb(b) = round(Int, b / 1024^2)
+    amount = p.total > 0 ? "  $(mb(p.done)) / $(mb(p.total)) MB" : ""
+    return "Pulling $(p.model)$amount  ($(el ÷ 60):$(lpad(el % 60, 2, '0')))"
 end
 
 # ── Search status feedback (module-level Ref, Revise-safe) ──

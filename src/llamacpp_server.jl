@@ -65,10 +65,10 @@ end
 "Ollama's model store: `OLLAMA_MODELS`, else `~/.ollama/models`."
 ollama_models_dir() = expanduser(get(ENV, "OLLAMA_MODELS", joinpath("~", ".ollama", "models")))
 
-# The digest of the weights layer in an Ollama manifest.
-function _manifest_model_digest(manifest::AbstractDict)
+# The weights layer of an Ollama manifest (`digest`, `size`), or `nothing`.
+function _manifest_model_layer(manifest::AbstractDict)
     for l in get(manifest, "layers", [])
-        endswith(String(get(l, "mediaType", "")), ".model") && return String(l["digest"])
+        endswith(String(get(l, "mediaType", "")), ".model") && return l
     end
     return nothing
 end
@@ -78,9 +78,9 @@ function ollama_store_model_file(model::AbstractString)
     ns, name, tag = split_model_name(model)
     mf = joinpath(ollama_models_dir(), "manifests", "registry.ollama.ai", ns, name, tag)
     isfile(mf) || return nothing
-    digest = try; _manifest_model_digest(JSON.parse(read(mf, String))); catch; nothing; end
-    digest === nothing && return nothing
-    f = joinpath(ollama_models_dir(), "blobs", replace(digest, ":" => "-"))
+    layer = try; _manifest_model_layer(JSON.parse(read(mf, String))); catch; nothing; end
+    layer === nothing && return nothing
+    f = joinpath(ollama_models_dir(), "blobs", replace(String(layer["digest"]), ":" => "-"))
     return isfile(f) ? f : nothing
 end
 
@@ -124,26 +124,33 @@ function llamacpp_local_models()::Vector{String}
 end
 
 """
-    download_embedding_model!(model) -> String
+    download_embedding_model!(model; progress = nothing) -> String
 
 Download `model`'s GGUF file from Ollama's registry into `embedding_model_dir()` and return its
 path. The file is checked against the manifest's SHA-256 digest before it is kept. The transfer
-runs in a subprocess using the `Downloads` standard library.
+runs in a subprocess using the `Downloads` standard library; `progress(done_bytes, total_bytes)`
+is called about twice a second while it runs.
 """
-function download_embedding_model!(model::AbstractString)::String
+function download_embedding_model!(model::AbstractString; progress = nothing)::String
     ns, name, tag = split_model_name(model)
     r = HTTP.get("$OLLAMA_REGISTRY/v2/$ns/$name/manifests/$tag",
                  ["Accept" => "application/vnd.docker.distribution.manifest.v2+json"];
                  status_exception = false)
     r.status == 200 || error("Ollama's registry has no model '$model' (HTTP $(r.status))")
-    digest = _manifest_model_digest(JSON.parse(String(r.body)))
-    digest === nothing && error("The manifest for '$model' names no model file")
+    layer = _manifest_model_layer(JSON.parse(String(r.body)))
+    layer === nothing && error("The manifest for '$model' names no model file")
+    digest, total = String(layer["digest"]), Int(get(layer, "size", 0))
     dest = downloaded_model_path(model)
     mkpath(dirname(dest))
     tmp = dest * ".part"
     url = "$OLLAMA_REGISTRY/v2/$ns/$name/blobs/$digest"
     code = "using Downloads; Downloads.download(ARGS[1], ARGS[2])"
-    run(service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`))
+    proc = run(service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`); wait = false)
+    while Base.process_running(proc)
+        progress === nothing || progress(isfile(tmp) ? filesize(tmp) : 0, total)
+        sleep(0.5)
+    end
+    success(proc) || (rm(tmp; force = true); error("The download of '$model' failed"))
     got = "sha256:" * bytes2hex(open(SHA.sha256, tmp))
     if got != digest
         rm(tmp; force = true)

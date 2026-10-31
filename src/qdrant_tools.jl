@@ -109,8 +109,10 @@ installed (its server starts on first use).
 """
 ping_embedder() = embedding_backend() === :llamacpp ? llamacpp_installed() : ping_ollama()
 
-_model_matches(installed::AbstractString, model::AbstractString) =
-    installed == model || startswith(installed, split(model, ":")[1])
+# Ollama names a model without a tag `name:latest`; otherwise the tag must match, since
+# `name:0.6b` and `name:8b` are different models.
+_with_tag(m::AbstractString) = occursin(':', m) ? String(m) : String(m) * ":latest"
+_model_matches(installed::AbstractString, model::AbstractString) = _with_tag(installed) == _with_tag(model)
 
 """
     check_ollama_model(model::String) -> Bool

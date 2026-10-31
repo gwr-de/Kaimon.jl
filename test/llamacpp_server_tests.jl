@@ -63,6 +63,13 @@ end
         end
     end
 
+    @testset "model names match by tag" begin
+        @test KL._model_matches("qwen3-embedding:0.6b", "qwen3-embedding:0.6b")
+        @test !KL._model_matches("qwen3-embedding:0.6b", "qwen3-embedding:8b")   # another model
+        @test KL._model_matches("nomic-embed-text:latest", "nomic-embed-text")
+        @test !KL._model_matches("nomic-embed-text:v1.5", "nomic-embed-text")
+    end
+
     @testset "the backend setting picks what embeds" begin
         store = mktempdir()
         try
