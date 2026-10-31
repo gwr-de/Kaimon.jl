@@ -813,3 +813,25 @@ end
     end
 
 end
+
+@testset "Activity row outcome" begin
+    ex_row(eval_id; ok = true) =
+        Kaimon.ToolCallResult(now(), "ex", "{}", "⏳ promoted", "30.0s", ok, "abcd1234", eval_id)
+    jobs = Dict("run1" => :promoted, "done1" => :completed, "fail1" => :failed,
+                "canc1" => :cancelled, "tout1" => :timeout)
+    # A promoted ex follows its job's status, not the call that promoted it.
+    @test Kaimon._row_outcome(ex_row("run1"), jobs) === :running
+    @test Kaimon._row_outcome(ex_row("done1"), jobs) === :completed
+    @test Kaimon._row_outcome(ex_row("fail1"), jobs) === :failed
+    @test Kaimon._row_outcome(ex_row("canc1"), jobs) === :cancelled
+    @test Kaimon._row_outcome(ex_row("tout1"), jobs) === :failed
+    # No job record: the call's own success decides.
+    @test Kaimon._row_outcome(ex_row("gone"), jobs) === :completed
+    @test Kaimon._row_outcome(ex_row("gone"; ok = false), jobs) === :failed
+    other = Kaimon.ToolCallResult(now(), "cancel_eval", "{}", "ok", "1ms", true, "")
+    @test Kaimon._row_outcome(other, jobs) === :completed
+    # Every outcome has a mark and a label.
+    for o in (:completed, :failed, :cancelled, :running)
+        @test haskey(Kaimon._OUTCOME_MARKS, o) && haskey(Kaimon._OUTCOME_LABELS, o)
+    end
+end
