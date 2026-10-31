@@ -1,5 +1,9 @@
 // Deterministic Codex app-server + ACP fixture. No model, network, or login required.
 const readline = require('node:readline');
+if (process.argv.includes('--version')) {
+  process.stdout.write('@agentclientprotocol/codex-acp 0.0.0-fixture\n');
+  process.exit(0);
+}
 const cli = process.argv.includes('cli');
 const names = ['Kaimon', 'kaimon', 'project_alias'];
 const out = o => process.stdout.write(JSON.stringify(o) + '\n');
@@ -13,7 +17,8 @@ readline.createInterface({input: process.stdin}).on('line', line => {
     if (!m.params.includeLayers || !m.params.cwd ||
         !process.argv.includes('app-server') || !process.argv.includes('-C') ||
         !process.argv.some(a => a.startsWith('projects={'))) process.exit(2);
-    result = {config: {mcp_servers: {Kaimon: {url: 'http://untagged/mcp'}}},
+    result = {config: {mcp_servers: {Kaimon: {url: 'http://untagged/mcp'}},
+                       shell_environment_policy: {exclude: ['FIXTURE_EXCLUDED']}},
       layers: names.map(name => ({config: {mcp_servers: {[name]: {url: 'http://untagged/mcp'}}}}))};
   } else if (!cli && m.method === 'session/new') {
     result = {sessionId: 'fixture', fixture: {

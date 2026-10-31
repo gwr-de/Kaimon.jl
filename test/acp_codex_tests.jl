@@ -10,16 +10,23 @@ using ReTest, Kaimon, JSON
             "headers" => Any[Dict("name" => "X-Kaimon-Agent-Id", "value" => "codex-test")])])
     cfg = Dict("model" => "keep-model", "model_reasoning_effort" => "high",
                "mcp_servers" => Dict("env_alias" => Dict("url" => "http://localhost:2828/mcp")),
-               "mcp_servers.dotted_alias.enabled" => true)
+               "mcp_servers.dotted_alias.enabled" => true,
+               "shell_environment_policy" => Dict("inherit" => "core", "exclude" => ["FROM_ENV"]))
     env = Dict("CODEX_HOME" => "/existing/login/home", "CODEX_CONFIG" => JSON.json(cfg),
                "DISABLE_MCP_CONFIG_FILTERING" => "false", "OPENAI_API_KEY" => "fixture-key")
     original = copy(env)
-    servers = Kaimon._codex_acp_setup!(env, b, pwd(); discover = (_, _, _) -> collect(keys(inherited)))
+    servers = Kaimon._codex_acp_setup!(env, b, pwd(); discover = (_, _, _) -> (mcp_names = collect(keys(inherited)), shell_exclude = ["USER_EXCLUDED"]))
     overrides = JSON.parse(env["CODEX_CONFIG"])
     for name in ("Kaimon", "project_alias", "kaimon", "env_alias", "dotted_alias")
         @test overrides["mcp_servers.$name.enabled"] === false
     end
     @test !haskey(overrides, "mcp_servers")
+    # The headers ride in CODEX_CONFIG, so Codex's shell commands must not inherit it. The user's
+    # own exclusions survive, and a nested policy table is flattened so nothing replaces the list.
+    @test Set(overrides["shell_environment_policy.exclude"]) ==
+          Set(["USER_EXCLUDED", "FROM_ENV", "CODEX_CONFIG"])
+    @test overrides["shell_environment_policy.inherit"] == "core"
+    @test !haskey(overrides, "shell_environment_policy")
     @test overrides["model"] == cfg["model"]
     @test overrides["model_reasoning_effort"] == "high"
     @test env["CODEX_HOME"] == original["CODEX_HOME"]
@@ -85,7 +92,7 @@ using ReTest, Kaimon, JSON
         discover = (_, _, _) -> error("cannot read configuration"))
     @test_throws ErrorException Kaimon._codex_acp_setup!(Dict("CODEX_CONFIG" => "[]"), b, pwd())
     @test_throws ErrorException Kaimon._codex_acp_setup!(copy(original), b, pwd();
-        discover = (_, _, _) -> ["unsafe.name"])
+        discover = (_, _, _) -> (mcp_names = ["unsafe.name"], shell_exclude = String[]))
     @test Kaimon._acp_codex(["/some/path/codex-acp.cmd"])
     @test !Kaimon._acp_codex(["claude-agent-acp"])
 end
@@ -94,10 +101,14 @@ if _HAVE_NODE
 @testset "ACP: Codex config discovery reads layers and fails closed" begin
     fixture = joinpath(@__DIR__, "fixtures", "codex_acp_config.cjs")
     argv = ["node", fixture]
-    @test Set(Kaimon._codex_mcp_names(argv, pwd(), copy(ENV))) ==
-          Set(["Kaimon", "kaimon", "project_alias"])
-    @test_throws TaskFailedException Kaimon._codex_mcp_names(
+    found = Kaimon._codex_read_config(argv, pwd(), copy(ENV))
+    @test Set(found.mcp_names) == Set(["Kaimon", "kaimon", "project_alias"])
+    @test found.shell_exclude == ["FIXTURE_EXCLUDED"]
+    # Anything but the maintained adapter is refused up front, with the install command.
+    @test_throws "npm install -g @agentclientprotocol/codex-acp" Kaimon._codex_read_config(
         ["node", "-e", "process.exit(1)", "--"], pwd(), copy(ENV))
+    @test_throws "codex-acp 0.16.0" Kaimon._codex_read_config(
+        ["node", "-e", "console.log('codex-acp 0.16.0')", "--"], pwd(), copy(ENV))
 
     if !Sys.iswindows()
         # Name the node executable like the adapter so this goes through backend_start's
@@ -119,6 +130,8 @@ if _HAVE_NODE
                     for name in ("Kaimon", "kaimon", "project_alias")
                         @test captured["config"]["mcp_servers.$name.enabled"] === false
                     end
+                    @test Set(captured["config"]["shell_environment_policy.exclude"]) ==
+                          Set(["FIXTURE_EXCLUDED", "CODEX_CONFIG"])
                     key = only(k for k in keys(captured["config"]) if startswith(k, "mcp_servers.kaimon_owned_"))
                     server = captured["config"][key]
                     @test server["enabled"] === true

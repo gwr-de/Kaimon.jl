@@ -252,12 +252,35 @@ function _acp_split_tool(n::AbstractString)
     return (nothing, String(n))
 end
 
+const _CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp"
+
 """
-Ask the adapter's own Codex app-server for MCP names in every configuration layer.
-Use the same cwd trust override as the adapter's session/new. Never inspect or copy credentials,
-and fail closed if discovery fails: starting without these names would reopen the untagged door.
+Refuse an adapter other than `$_CODEX_ACP_PACKAGE`. Discovery and the isolation overrides use its
+`cli` passthrough and `CODEX_CONFIG`; the earlier Zed adapter of the same executable name has
+neither, and would otherwise fail only after the discovery timeout.
 """
-function _codex_mcp_names(argv::Vector{String}, cwd::String, env)
+function _codex_acp_check_version(argv::Vector{String}, env)
+    out = Pipe()
+    proc = run(pipeline(setenv(Cmd(_spawn_argv(vcat(argv, ["--version"]))), env);
+                        stdin = devnull, stdout = out, stderr = out); wait = false)
+    close(out.in)
+    reader = @async read(out, String)
+    timedwait(() -> !process_running(proc), 10.0)
+    process_running(proc) && kill(proc)
+    text = strip(fetch(reader))
+    startswith(text, _CODEX_ACP_PACKAGE * " ") && return nothing
+    error("Kaimon drives Codex through $_CODEX_ACP_PACKAGE (npm install -g $_CODEX_ACP_PACKAGE); " *
+          "`$(first(argv))` reports: $(isempty(text) ? "no version" : first(text, 200))")
+end
+
+"""
+Ask the adapter's own Codex app-server for MCP names in every configuration layer, and for the
+effective shell environment exclusions. Use the same cwd trust override as the adapter's
+session/new. Never inspect or copy credentials, and fail closed if discovery fails: starting
+without these names would reopen the untagged door.
+"""
+function _codex_read_config(argv::Vector{String}, cwd::String, env)
+    _codex_acp_check_version(argv, env)
     trust = "projects={$(JSON.json(abspath(cwd)))={trust_level=\"trusted\"}}"
     args = _spawn_argv(vcat(argv, ["cli", "-C", abspath(cwd), "-c", trust, "app-server"]))
     input, output = Pipe(), Pipe()
@@ -286,7 +309,9 @@ function _codex_mcp_names(argv::Vector{String}, cwd::String, env)
         for config in configs
             union!(names, String.(keys(get(config, "mcp_servers", Dict()))))
         end
-        collect(names)
+        policy = get(response["config"], "shell_environment_policy", nothing)
+        exclude = policy isa AbstractDict ? String.(get(policy, "exclude", String[])) : String[]
+        (mcp_names = collect(names), shell_exclude = exclude)
     end
     try
         timedwait(() -> istaskdone(reader), 30.0) === :ok ||
@@ -307,12 +332,28 @@ top-level mcp_servers map. Install our connection through a separate dotted over
 and send no session/new servers: that bypasses the adapter's collision filter and avoids
 overlapping parent/child overrides whose application order depends on a Rust HashMap.
 A fresh name avoids stale transport fields from a configured name being deep-merged in.
+
+The tagged connection's headers (the agent id, and Kaimon's API key when one is set) travel in
+`CODEX_CONFIG`, which Codex would pass to every shell command it runs, so it is added to the
+shell environment exclusions. A dotted list override replaces the inherited list, so the
+effective exclusions are carried over.
 """
 function _codex_acp_setup!(env, b::ACPClientBackend, cwd::String;
-                           discover = _codex_mcp_names)
+                           discover = _codex_read_config)
     cfg = JSON.parse(get(env, "CODEX_CONFIG", "{}"))
     cfg isa AbstractDict || error("CODEX_CONFIG must be a JSON object")
-    names = Set(discover(b.argv, cwd, env))
+    found = discover(b.argv, cwd, env)
+    names = Set{String}(found.mcp_names)
+    exclude = String.(found.shell_exclude)
+    nested = pop!(cfg, "shell_environment_policy", nothing)
+    if nested isa AbstractDict   # flattened, so no parent override can replace the dotted list
+        for (k, v) in nested
+            k == "exclude" ? append!(exclude, String.(v)) : (cfg["shell_environment_policy.$k"] = v)
+        end
+    end
+    append!(exclude, String.(pop!(cfg, "shell_environment_policy.exclude", String[])))
+    push!(exclude, "CODEX_CONFIG")
+    cfg["shell_environment_policy.exclude"] = unique(exclude)
     inherited = pop!(cfg, "mcp_servers", Dict())
     inherited isa AbstractDict || error("CODEX_CONFIG.mcp_servers must be an object")
     union!(names, String.(keys(inherited)))

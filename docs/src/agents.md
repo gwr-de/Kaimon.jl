@@ -243,8 +243,11 @@ directory and trust setting. All inherited servers (including user/project alias
 refuses the spawn. The tagged connection gets a fresh `kaimon_owned_<id>` name
 and is installed through the same process-local overrides. No servers are sent
 through `session/new`, so the adapter's collision filter cannot discard it.
-No global configuration or credentials are rewritten. This requires the adapter's
-`cli` and `CODEX_CONFIG` interfaces (verified with 2.5.0).
+No global configuration or credentials are rewritten. Because `CODEX_CONFIG` carries
+the tagged connection's headers, Kaimon also adds it to Codex's shell environment
+exclusions, keeping any exclusions already configured. This requires the adapter's
+`cli` and `CODEX_CONFIG` interfaces (verified with 2.5.0); Kaimon checks
+`codex-acp --version` and refuses any other adapter with the install command.
 
 The `notebook` and `specialist` presets still do not disable Codex's native tools.
 In adapter 2.5.0, a native file read completes without a permission request even
