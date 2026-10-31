@@ -86,6 +86,25 @@ embedding_model_dir()::String =
     abspath(expanduser(String(search_setting("embedding", "model_dir", "KAIMON_MODEL_DIR",
                                              joinpath(kaimon_cache_dir(), "models")))))
 
+# ── Logs ──────────────────────────────────────────────────────────────────────
+
+const SERVICE_LOG_ROTATE_BYTES = 32 * 1024^2
+
+"""
+    open_service_log(path) -> IO
+
+Open a service's log for appending. A log past `SERVICE_LOG_ROTATE_BYTES` is first moved to
+`<path>.1`, so one earlier log is kept and the next start does not erase a crash's output.
+"""
+function open_service_log(path::AbstractString)
+    isfile(path) && filesize(path) > SERVICE_LOG_ROTATE_BYTES && mv(path, path * ".1"; force = true)
+    return open(path, "a")
+end
+
+"The last `n` lines of the log at `path`, for an error message."
+log_tail(path::AbstractString; n::Integer = 12) =
+    isfile(path) ? join(last(readlines(path), n), "\n") : ""
+
 # ── Subprocesses ──────────────────────────────────────────────────────────────
 
 """

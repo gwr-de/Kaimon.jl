@@ -160,12 +160,21 @@ function download_embedding_model!(model::AbstractString; progress = nothing)::S
     tmp = dest * ".part"
     url = "$OLLAMA_REGISTRY/v2/$ns/$name/blobs/$digest"
     code = "using Downloads; Downloads.download(ARGS[1], ARGS[2])"
-    proc = run(service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`); wait = false)
-    while Base.process_running(proc)
-        progress === nothing || progress(isfile(tmp) ? filesize(tmp) : 0, total)
-        sleep(0.5)
+    # The subprocess's output goes to a log: inherited, it would be written over the TUI.
+    log = joinpath(llamacpp_dir(), "download-$(_model_slug(model)).log")
+    proc = open(log, "w") do io
+        p = run(pipeline(service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no -e $code $url $tmp`);
+                         stdin = devnull, stdout = io, stderr = io); wait = false)
+        while Base.process_running(p)
+            progress === nothing || progress(isfile(tmp) ? filesize(tmp) : 0, total)
+            sleep(0.5)
+        end
+        p
     end
-    success(proc) || (rm(tmp; force = true); error("The download of '$model' failed"))
+    if !success(proc)
+        rm(tmp; force = true)
+        error("The download of '$model' failed:\n" * log_tail(log))
+    end
     got = "sha256:" * bytes2hex(open(SHA.sha256, tmp))
     if got != digest
         rm(tmp; force = true)
@@ -234,6 +243,9 @@ function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
         r = read_service_record(rec)
         (r !== nothing && record_live_here(r) && _llamacpp_ok(r.port, r.key)) &&
             return ("http://127.0.0.1:$(r.port)", r.key)
+        if r !== nothing && r.host == gethostname() && !_pid_alive(r.pid)
+            @warn "The llama.cpp server for '$model' has exited; starting a new one" log = llamacpp_log_path(model)
+        end
         load_llamacpp_jll!() || return nothing
         file = embedding_model_file(model)
         if file === nothing
@@ -253,7 +265,9 @@ function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
         exe = Base.invokelatest(mod.llama_server)::Cmd
         cmd = `$exe $(llamacpp_server_args(file, port, key))`
         @info "Starting llama.cpp embedding server" model port log
-        logio = open(log, "w")
+        logio = open_service_log(log)
+        println(logio, "\n── $(Dates.now()) llama-server for $model on 127.0.0.1:$port ──")
+        flush(logio)
         proc = run(pipeline(cmd; stdin = devnull, stdout = logio, stderr = logio); wait = false)
         _LLAMACPP_PROCS[model] = proc
         write_service_record(rec, ServiceRecord(port, key; pid = getpid(proc)))
@@ -302,20 +316,37 @@ function shutdown_llamacpp!()
 end
 
 """
-    llamacpp_embedding(text, model) -> Vector{Float64}
+    llamacpp_embedding(text, model; retries = 2) -> Vector{Float64}
 
-Embed `text` with `model` through the managed llama.cpp server. Empty on failure.
+Embed `text` with `model` through the managed llama.cpp server. A failed request is retried (a
+server that died is restarted by `ensure_llamacpp!`); the last failure is logged. Empty on failure.
 """
-function llamacpp_embedding(text::AbstractString, model::AbstractString)::Vector{Float64}
-    ep = ensure_llamacpp!(model)
-    ep === nothing && return Float64[]
-    url, key = ep
-    r = HTTP.post("$url/v1/embeddings",
-                  ["Content-Type" => "application/json", "Authorization" => "Bearer $key"],
-                  JSON.json(Dict("model" => model, "input" => String(text)));
-                  status_exception = false, retry_non_idempotent = true)
-    r.status == 200 || (@debug "llama.cpp embedding failed" status = r.status; return Float64[])
-    data = get(JSON.parse(String(r.body)), "data", [])
-    isempty(data) && return Float64[]
-    return Float64.(first(data)["embedding"])
+function llamacpp_embedding(text::AbstractString, model::AbstractString; retries::Int = 2)::Vector{Float64}
+    body = JSON.json(Dict("model" => model, "input" => String(text)))
+    note = ""
+    for attempt in 0:retries
+        ep = ensure_llamacpp!(model)
+        if ep === nothing
+            note = "no server (see the messages above)"
+            break
+        end
+        url, key = ep
+        try
+            r = HTTP.post("$url/v1/embeddings",
+                          ["Content-Type" => "application/json", "Authorization" => "Bearer $key"],
+                          body; status_exception = false, retry_non_idempotent = true)
+            if r.status == 200
+                data = get(JSON.parse(String(r.body)), "data", [])
+                isempty(data) || return Float64.(first(data)["embedding"])
+                note = "empty embeddings"
+            else
+                note = "status $(r.status): $(first(String(r.body), 200))"
+            end
+        catch e
+            note = sprint(showerror, e)
+        end
+        attempt < retries && sleep(0.25 * (attempt + 1))
+    end
+    @warn "llama.cpp embedding failed" model attempts = (retries + 1) note log = llamacpp_log_path(model)
+    return Float64[]
 end

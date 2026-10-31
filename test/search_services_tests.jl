@@ -105,6 +105,23 @@ end
         end
     end
 
+    @testset "service logs append, and rotate past their limit" begin
+        d = mktempdir()
+        try
+            log = joinpath(d, "svc.log")
+            io = KS.open_service_log(log); println(io, "first run"); close(io)
+            io = KS.open_service_log(log); println(io, "second run"); close(io)
+            @test readlines(log) == ["first run", "second run"]          # a restart keeps the earlier output
+            @test KS.log_tail(log; n = 1) == "second run"
+            write(log, "x"^(KS.SERVICE_LOG_ROTATE_BYTES + 1))
+            close(KS.open_service_log(log))
+            @test isfile(log * ".1") && filesize(log) == 0               # moved aside, fresh log
+            @test KS.log_tail(joinpath(d, "missing.log")) == ""
+        finally
+            rm(d; recursive = true, force = true)
+        end
+    end
+
     @testset "service keys are random and long" begin
         a, b = KS.new_service_key(), KS.new_service_key()
         @test a != b && length(a) == 48 && all(isxdigit, a)

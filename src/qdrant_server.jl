@@ -112,9 +112,6 @@ qdrant_log_path() = joinpath(private_dir(qdrant_storage_root()), "qdrant-$(getho
 """The managed instance's record: host, pid, port, API key and heartbeat (see `ServiceRecord`)."""
 qdrant_record_path() = joinpath(qdrant_storage_root(), "server.json")
 
-"""Size past which the managed Qdrant log is rotated to `qdrant.log.1` at spawn."""
-const _QDRANT_LOG_ROTATE_BYTES = 32 * 1024^2
-
 """
     qdrant_endpoint() -> (url, key)
 
@@ -197,9 +194,8 @@ function _spawn_managed_qdrant(; storage_path::String, http_port::Int, grpc_port
     env = _qdrant_env(; storage_path, http_port, grpc_port, api_key)
     # `qdrant()` was defined by a just-loaded module — reach it past the current world.
     qdrant_cmd = Base.invokelatest(mod.qdrant)::Cmd
-    # Qdrant logs every request, so keep one previous log rather than appending forever.
-    filesize(log_path) > _QDRANT_LOG_ROTATE_BYTES && mv(log_path, log_path * ".1"; force = true)
-    logio = open(log_path, "a")
+    # Qdrant logs every request, so the log is rotated rather than appended to forever.
+    logio = open_service_log(log_path)
     # Run with the cache dir as the working directory. Qdrant writes a
     # `.qdrant-initialized` marker (and any other cwd-relative files) into its
     # working dir; without this it inherits the launching process's cwd — e.g. the
