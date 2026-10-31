@@ -166,12 +166,15 @@ llamacpp_threads()::Int =
 
 _model_slug(model::AbstractString) = replace(model, r"[^A-Za-z0-9._-]" => "_")
 
+"Kaimon's directory for llama.cpp server records and logs, private to this account."
+llamacpp_dir() = private_dir(joinpath(kaimon_cache_dir(), "llamacpp"))
+
 "This machine's record for the server of `model`."
 llamacpp_record_path(model::AbstractString) =
-    joinpath(private_dir(joinpath(kaimon_cache_dir(), "llamacpp")), "$(gethostname())-$(_model_slug(model)).json")
+    joinpath(llamacpp_dir(), "$(gethostname())-$(_model_slug(model)).json")
 
 llamacpp_log_path(model::AbstractString) =
-    joinpath(private_dir(joinpath(kaimon_cache_dir(), "llamacpp")), "$(gethostname())-$(_model_slug(model)).log")
+    joinpath(llamacpp_dir(), "$(gethostname())-$(_model_slug(model)).log")
 
 _llamacpp_child_alive(model) = (p = get(_LLAMACPP_PROCS, model, nothing); p isa Base.Process && Base.process_running(p))
 

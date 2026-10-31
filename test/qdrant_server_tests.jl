@@ -3,14 +3,14 @@ using Kaimon
 
 const K = Kaimon
 
-# Run everything under a throwaway cache dir so pid files / service env / storage
+# Run everything under a throwaway cache dir so records / service env / storage
 # never touch a real managed Qdrant. `kaimon_cache_dir()` recomputes from the
-# environment each call, appending "kaimon" under XDG_CACHE_HOME on Unix (and using
-# LOCALAPPDATA on Windows), so redirecting these fully isolates the test.
+# environment each call and takes KAIMON_CACHE_DIR as the directory itself, on
+# every platform, so setting it fully isolates the test.
 function _with_temp_cache(f)
     dir = mktempdir()
     try
-        withenv("XDG_CACHE_HOME" => dir, "LOCALAPPDATA" => dir) do
+        withenv("KAIMON_CACHE_DIR" => dir) do
             f(dir)
         end
     finally

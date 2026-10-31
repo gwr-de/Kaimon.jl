@@ -56,8 +56,7 @@ end
     end
 
     @testset "not installed: nothing is started" begin
-        cache = mktempdir()
-        withenv("XDG_CACHE_HOME" => cache, "LOCALAPPDATA" => cache) do   # LOCALAPPDATA on Windows
+        withenv("KAIMON_CACHE_DIR" => mktempdir()) do
             @test !KL.llamacpp_installed()
             @test KL.ensure_llamacpp!("qwen3-embedding:0.6b") === nothing
             @test isempty(KL._LLAMACPP_PROCS)
@@ -68,9 +67,8 @@ end
         store = mktempdir()
         try
             _fake_ollama_store(store)
-            cache = mktempdir()
             withenv("KAIMON_EMBEDDING_BACKEND" => "llamacpp", "OLLAMA_MODELS" => store,
-                    "XDG_CACHE_HOME" => cache, "LOCALAPPDATA" => cache) do
+                    "KAIMON_CACHE_DIR" => mktempdir()) do
                 @test KL.embedding_backend() === :llamacpp
                 @test KL.embedder_name() == "llama.cpp"
                 @test !KL.ping_embedder()                                  # not installed here
