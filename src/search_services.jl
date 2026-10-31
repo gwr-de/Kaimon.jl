@@ -95,8 +95,7 @@ embedding_model_dir()::String =
 The `kaimon` app launcher sets `JULIA_LOAD_PATH` to the Kaimon checkout alone, which a child would
 inherit: it could then load neither the environment it activates nor the standard library.
 """
-service_julia_cmd(cmd::Cmd) =
-    addenv(cmd, "JULIA_LOAD_PATH" => join(("@", "@v#.#", "@stdlib"), Sys.iswindows() ? ';' : ':'))
+service_julia_cmd(cmd::Cmd) = addenv(cmd, "JULIA_LOAD_PATH" => _join_load_path("@", "@v#.#", "@stdlib"))
 
 # ── Ports ─────────────────────────────────────────────────────────────────────
 

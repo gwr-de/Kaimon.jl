@@ -632,13 +632,7 @@ function _remove_copilot(m::KaimonModel)
 end
 
 function _remove_vscode(m::KaimonModel)
-    mcp_dir = if Sys.isapple()
-        joinpath(homedir(), "Library", "Application Support", "Code", "User")
-    elseif Sys.iswindows()
-        joinpath(get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")), "Code", "User")
-    else
-        joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "Code", "User")
-    end
+    mcp_dir = vscode_user_dir()
     target_file = joinpath(mcp_dir, "mcp.json")
     _remove_server_from_json!(target_file, "servers")
     m.flow_message = "Removed kaimon from\n$(_short_path(target_file))"
@@ -777,13 +771,7 @@ end
 function _install_vscode(m::KaimonModel, port::Int, api_key)
     url = "http://localhost:$port/mcp"
     # VS Code user-level MCP config
-    mcp_dir = if Sys.isapple()
-        joinpath(homedir(), "Library", "Application Support", "Code", "User")
-    elseif Sys.iswindows()
-        joinpath(get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")), "Code", "User")
-    else
-        joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "Code", "User")
-    end
+    mcp_dir = vscode_user_dir()
     isdir(mcp_dir) || mkpath(mcp_dir)
     mcp_file = joinpath(mcp_dir, "mcp.json")
 
@@ -965,7 +953,7 @@ end
 
 function _install_opencode(m::KaimonModel, port::Int, api_key)
     url = "http://localhost:$port/mcp"
-    opencode_dir = joinpath(homedir(), ".config", "opencode")
+    opencode_dir = opencode_config_dir()
     isdir(opencode_dir) || mkpath(opencode_dir)
     target_file = joinpath(opencode_dir, "opencode.json")
 
@@ -996,7 +984,7 @@ function _install_opencode(m::KaimonModel, port::Int, api_key)
 end
 
 function _remove_opencode(m::KaimonModel)
-    target_file = joinpath(homedir(), ".config", "opencode", "opencode.json")
+    target_file = joinpath(opencode_config_dir(), "opencode.json")
     _remove_server_from_json!(target_file, "mcp")
     m.flow_message = "Removed kaimon from\n$(_short_path(target_file))"
     m.flow_success = true
