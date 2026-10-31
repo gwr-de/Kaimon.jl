@@ -72,37 +72,37 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
             hint = m.search_managed_qdrant_installed ? " start managed Qdrant" :
                                                        " enable managed Qdrant"
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Qdrant  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Qdrant", 10), txt),
                 ("[l]", tstyle(:warning)), (hint, dim),
             ])
         else
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Qdrant  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Qdrant", 10), txt),
                 ("docker run -d -p 6333:6333 qdrant/qdrant", dim),
             ])
         end
         y += 1
         if ollama_ok
             _write_spans!(buf, x, y, [
-                ("● ", tstyle(:success)), (rpad(embedder, 8), txt),
+                ("● ", tstyle(:success)), (rpad(embedder, 10), txt),
                 (m.search_embedding_model, tstyle(:accent)),
             ])
         elseif m.search_embedder_up
             _write_spans!(buf, x, y, [
-                ("◐ ", tstyle(:warning)), (rpad(embedder, 8), txt),
+                ("◐ ", tstyle(:warning)), (rpad(embedder, 10), txt),
                 ("model missing  ", txt),
                 ("[p]", tstyle(:warning)),
                 (" pull $(m.search_embedding_model)", dim),
             ])
         elseif m.search_embedding_backend === :llamacpp
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), (rpad(embedder, 8), txt),
+                ("○ ", tstyle(:error)), (rpad(embedder, 10), txt),
                 ("not installed  ", txt), ("[o]", tstyle(:warning)), (" then ", dim),
                 ("[b]", tstyle(:warning)), (" to install", dim),
             ])
         else
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Ollama  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Ollama", 10), txt),
                 ("https://ollama.com/download", dim),
             ])
         end
