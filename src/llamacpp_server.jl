@@ -98,6 +98,21 @@ function embedding_model_file(model::AbstractString)
     return isfile(d) ? d : nothing
 end
 
+"""
+    remove_downloaded_model!(model) -> Bool
+
+Stop `model`'s llama.cpp server if this process runs it, and delete Kaimon's downloaded copy.
+`false` when there is no downloaded copy. A file in an Ollama store is never touched: Ollama shares
+blobs between models and removes them itself.
+"""
+function remove_downloaded_model!(model::AbstractString)::Bool
+    lock(() -> _stop_llamacpp_locked!(String(model)), _LLAMACPP_LOCK)
+    f = downloaded_model_path(model)
+    isfile(f) || return false
+    rm(f; force = true)
+    return true
+end
+
 "Models available to the llama.cpp backend: those in an Ollama store and those downloaded."
 function llamacpp_local_models()::Vector{String}
     out = String[]

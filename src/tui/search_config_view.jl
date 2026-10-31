@@ -160,10 +160,19 @@ function _view_search_config(m::KaimonModel, area::Rect, buf::Buffer)
         ("Enter", tstyle(:accent)), (" select  ", tstyle(:text_dim)),
         ("b", tstyle(:accent)), (" backend (Ollama / llama.cpp)", tstyle(:text_dim)),
     ])
-    _write_spans!(buf, x, hint_y + 1, [
-        ("+/-", tstyle(:accent)), (" results  ", tstyle(:text_dim)),
-        ("Esc", tstyle(:accent)), (" close", tstyle(:text_dim)),
-    ])
+    if isempty(m.search_config_remove_confirm)
+        _write_spans!(buf, x, hint_y + 1, [
+            ("+/-", tstyle(:accent)), (" results  ", tstyle(:text_dim)),
+            ("x", tstyle(:accent)), (" remove model  ", tstyle(:text_dim)),
+            ("Esc", tstyle(:accent)), (" close", tstyle(:text_dim)),
+        ])
+    else
+        _write_spans!(buf, x, hint_y + 1, [
+            ("x", tstyle(:warning)), (" again to remove ", tstyle(:warning)),
+            (m.search_config_remove_confirm, tstyle(:warning, bold = true)),
+            ("   any other key cancels", tstyle(:text_dim)),
+        ])
+    end
 end
 
 """Render the collection detail overlay panel."""

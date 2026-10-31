@@ -356,6 +356,17 @@ function Tachikoma.update!(m::KaimonModel, evt::TaskEvent)
         end
         m.search_health_last_check = 0.0
         _refresh_search_health_async!(m)
+    elseif evt.id == :search_remove_model
+        r = evt.value::NamedTuple
+        if r.removed
+            _set_search_status!("Removed '$(r.model)'")
+            _push_log!(:info, "Removed embedding model '$(r.model)'")
+        else
+            _set_search_status!("Did not remove '$(r.model)': $(r.note)")
+        end
+        _refresh_search_config_info!(m)
+        m.search_health_last_check = 0.0
+        _refresh_search_health_async!(m)
     elseif evt.id == :search_remove_qdrant
         r = evt.value::NamedTuple
         if r.removed
@@ -380,7 +391,8 @@ function Tachikoma.update!(m::KaimonModel, evt::TaskEvent)
         _refresh_search_health_async!(m)
     elseif evt.id == :search_config_info
         result = evt.value::NamedTuple
-        m.search_config_models = result.models
+        # The panel's last entry, "Custom...", is not a model the backend reports; keep it.
+        m.search_config_models = [result.models; [(name = "Custom...", dims = 0, ctx = 0, installed = false)]]
         m.search_config_col_info = result.col_info
     elseif evt.id == :search_sync_collection
         result = evt.value::NamedTuple

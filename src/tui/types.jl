@@ -380,6 +380,7 @@ const TAB_ADVANCED   = 10
     } = @NamedTuple{name::String, dims::Int, ctx::Int, installed::Bool}[]
     search_config_custom_input::Any = nothing            # TextInput for custom model name
     search_config_custom_editing::Bool = false          # true when editing custom model field
+    search_config_remove_confirm::String = ""           # model awaiting a second [x] to remove
     search_config_col_info::Dict = Dict()              # cached collection_info result
     search_dimension_mismatch::Bool = false             # auto-detected dimension mismatch
     search_delete_confirm::Bool = false                 # delete confirmation state

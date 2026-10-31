@@ -142,6 +142,18 @@ Returns an empty vector on error or if Ollama is unreachable.
 """
 list_ollama_models() = something(_ollama_tags(), String[])
 
+"Ask Ollama to delete `model`. True when it did."
+function remove_ollama_model(model::AbstractString)::Bool
+    try
+        r = HTTP.request("DELETE", "$(ollama_url())/api/delete", ["Content-Type" => "application/json"],
+                         JSON.json(Dict("model" => model, "name" => model));
+                         status_exception = false, retry = false, connect_timeout = 2, request_timeout = 30)
+        return r.status == 200
+    catch
+        return false
+    end
+end
+
 "Models the configured embedding backend has locally."
 list_embedding_models() = embedding_backend() === :llamacpp ? llamacpp_local_models() : list_ollama_models()
 

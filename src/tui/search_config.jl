@@ -452,7 +452,12 @@ function _open_search_config!(m::KaimonModel)
         label = "Model: ", tick = m.tick)
     m.search_config_custom_editing = false
 
-    # Fire async task to check Ollama availability + collection info
+    _refresh_search_config_info!(m)
+end
+
+"""Re-read which models the backend has and the selected collection's info, in the background."""
+function _refresh_search_config_info!(m::KaimonModel)
+    model_names = sort!(collect(keys(EMBEDDING_CONFIGS)))
     col_name = if !isempty(m.search_collections)
         sel = clamp(m.search_selected_collection, 1, length(m.search_collections))
         m.search_collections[sel]
@@ -485,6 +490,41 @@ function _open_search_config!(m::KaimonModel)
     end
 end
 
+"""
+`[x]` on a model in the config panel: the first press asks, the second removes it from the current
+backend — Ollama deletes it, or for llama.cpp Kaimon's downloaded copy is deleted (a file in Ollama's
+store is left to Ollama).
+"""
+function _remove_selected_model!(m::KaimonModel)
+    n = length(m.search_config_models)
+    n == 0 && return
+    entry = m.search_config_models[clamp(m.search_config_selected, 1, n)]
+    model = entry.name
+    if model == "Custom..." || !entry.installed
+        m.search_config_remove_confirm = ""
+        return _set_search_status!("'$model' is not installed")
+    end
+    if m.search_config_remove_confirm != model
+        m.search_config_remove_confirm = model
+        return
+    end
+    m.search_config_remove_confirm = ""
+    backend = m.search_embedding_backend
+    _set_search_status!("Removing '$model'...")
+    spawn_task!(m._task_queue, :search_remove_model) do
+        if backend === :llamacpp
+            removed = try; remove_downloaded_model!(model); catch; false; end
+            note = removed ? "" :
+                   ollama_store_model_file(model) !== nothing ?
+                   "it is in Ollama's store; remove it with Ollama (switch with [b])" : "no downloaded copy"
+            (model = model, removed = removed, note = note)
+        else
+            removed = remove_ollama_model(model)
+            (model = model, removed = removed, note = removed ? "" : "Ollama did not remove it")
+        end
+    end
+end
+
 """Handle key input inside the search config panel."""
 function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
     n_models = length(m.search_config_models)
@@ -506,6 +546,9 @@ function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
         end
         return
     end
+
+    # A pending removal waits for a second [x]; any other key cancels it.
+    (evt.key == :char && evt.char == 'x') || (m.search_config_remove_confirm = "")
 
     @match evt.key begin
         :escape => begin
@@ -541,7 +584,9 @@ function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
             end
         end
         :char => begin
-            if evt.char == 'b'
+            if evt.char == 'x'
+                _remove_selected_model!(m)
+            elseif evt.char == 'b'
                 # On llama.cpp that isn't installed yet, [b] installs it; otherwise it switches.
                 if m.search_embedding_backend === :llamacpp && !m.search_embedder_up
                     _install_llamacpp_async!(m)
