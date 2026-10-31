@@ -452,6 +452,8 @@ for epoch in 1:1000
 end
 ```
 
+`cancel_eval` records a request; it does not end the job. Until the code stops, `check_eval` reports the job as `running, …, cancel requested Ns ago`. When it stops, the job is recorded as `cancelled` together with its result. Code that never checks `is_cancelled()` runs to the end and is then recorded as `cancelled`. A shortened eval id works if it matches exactly one running job. Cancelling a job that has already finished leaves it unchanged and reports its status.
+
 ### Listing Jobs
 
 ```
