@@ -294,7 +294,8 @@ function _cross_project_semantic(query::AbstractString, collections, explicit_mo
             push!(notes, "Embedding with '$model' failed — $(length(cols)) collection(s) searched lexically only.")
             continue
         end
-        asyncmap(cols; ntasks = 16) do c
+        # Measured against a local Qdrant, more than a few concurrent searches gains nothing.
+        asyncmap(cols; ntasks = 4) do c
             res = try; QdrantClient.search(c, emb; limit = fetch, filter = filter); catch; []; end
             (length(res) == 1 && haskey(first(res), "error")) && return nothing
             hits = _semantic_hits(res)
