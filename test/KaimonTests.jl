@@ -50,5 +50,6 @@ include("send_restart_tests.jl")
 include("private_sessions_tests.jl")
 include("session_teardown_tests.jl")
 include("stream_routing_tests.jl")
+include("cancel_honest_tests.jl")
 
 end # module

@@ -188,6 +188,40 @@ end
 # True once a promoted ex's background job has finished and its full result is available.
 _ex_result_ready(rec) = rec !== nothing && rec.promoted && !isempty(rec.full_result)
 
+# How a finished call is marked. A promoted `ex` returned as soon as it was promoted, so its
+# own success says nothing about the job; its row follows the job's status instead.
+const _OUTCOME_MARKS = Dict(
+    :completed => ("✓", :success),
+    :failed => ("✗", :error),
+    :cancelled => ("⊘", :warning),
+    :running => ("⏳", :secondary),
+)
+const _OUTCOME_LABELS = Dict(
+    :completed => "Success", :failed => "Failed", :cancelled => "Cancelled", :running => "Running")
+
+_job_outcome(status::Symbol) =
+    status in (:running, :promoted) ? :running :
+    status in (:completed, :cancelled) ? status : :failed
+
+"""Status of every eval in the history, keyed by eval id. Built once per frame."""
+function _eval_status_map(m::KaimonModel)
+    out = Dict{String,Symbol}()
+    mgr = m.conn_mgr
+    mgr === nothing && return out
+    lock(mgr.eval_history_lock) do
+        for rec in mgr.eval_history
+            out[rec.eval_id] = rec.status
+        end
+    end
+    return out
+end
+
+function _row_outcome(r::ToolCallResult, job_status::Dict{String,Symbol})
+    st = (r.tool_name == "ex" && !isempty(r.eval_id)) ? get(job_status, r.eval_id, nothing) : nothing
+    st === nothing && return r.success ? :completed : :failed
+    return _job_outcome(st)
+end
+
 function _tool_preview(r::ToolCallResult)
     try
         args = JSON.parse(r.args_json)
@@ -472,10 +506,10 @@ function view_activity(m::KaimonModel, area::Rect, buf::Buffer)
             elapsed < 1.0 ? @sprintf("%.0fms", elapsed * 1000) : @sprintf("%.1fs", elapsed)
         push!(col_times, Dates.format(ifc.timestamp_dt, "HH:MM:SS"))
         si = mod1(m.tick ÷ 2, length(SPINNER_BRAILLE))
-        push!(col_tools, Span("$(SPINNER_BRAILLE[si]) $(ifc.tool_name)", tstyle(:warning)))
+        push!(col_tools, Span("$(SPINNER_BRAILLE[si]) $(ifc.tool_name)", tstyle(:secondary)))
         sess_name = _session_display_name(ifc.session_key)
         push!(col_sessions, isempty(sess_name) ? Span("開門", tstyle(:accent)) : sess_name)
-        push!(col_durations, Span(elapsed_str, tstyle(:warning)))
+        push!(col_durations, Span(elapsed_str, tstyle(:secondary)))
         preview = if ifc.tool_name == "ex"
             eid = _extract_eval_id(ifc.progress_lines)
             isempty(eid) ? "running…" : eid
@@ -483,19 +517,20 @@ function view_activity(m::KaimonModel, area::Rect, buf::Buffer)
             isempty(ifc.last_progress) ? "running…" : _truncate(ifc.last_progress, 40)
         end
         push!(col_preview, preview)
-        push!(row_styles, tstyle(:warning))
+        push!(row_styles, tstyle(:secondary))
         if m.selected_inflight == ii
             display_sel = item_idx
         end
     end
 
     # Completed calls (newest first)
+    job_status = _eval_status_map(m)
     for ri in Iterators.reverse(filtered)
         item_idx += 1
         r = m.tool_results[ri]
         push!(col_times, Dates.format(r.timestamp, "HH:MM:SS"))
-        marker = r.success ? "✓" : "✗"
-        tool_style = r.success ? tstyle(:success) : tstyle(:error)
+        marker, outcome_style = _OUTCOME_MARKS[_row_outcome(r, job_status)]
+        tool_style = tstyle(outcome_style)
         push!(col_tools, Span("$marker $(r.tool_name)", tool_style))
         sess_name = _session_display_name(r.session_key)
         push!(col_sessions, isempty(sess_name) ? Span("開門", tstyle(:accent)) : sess_name)
@@ -506,7 +541,7 @@ function view_activity(m::KaimonModel, area::Rect, buf::Buffer)
             _tool_preview(r)
         end
         push!(col_preview, Span(preview, tstyle(:text_dim)))
-        push!(row_styles, r.success ? tstyle(:success) : tstyle(:error))
+        push!(row_styles, tool_style)
         if m.selected_inflight == 0 && ri == m.selected_result
             display_sel = item_idx
         end
@@ -673,7 +708,7 @@ function view_activity(m::KaimonModel, area::Rect, buf::Buffer)
         # over the "⏳ promoted…" placeholder that's frozen in the ToolCallResult (#59).
         rec = _ex_eval_record(m, r)
         ready = _ex_result_ready(rec)
-        success = ready ? (rec.status == :completed) : r.success
+        outcome = ready ? _job_outcome(rec.status) : (r.success ? :completed : :failed)
         result_text = ready ? rec.full_result : r.result_text
 
         # (Re)build the Paragraph when selection or wrap mode changes — or when a promoted
@@ -681,12 +716,8 @@ function view_activity(m::KaimonModel, area::Rect, buf::Buffer)
         if m._detail_for_result != m.selected_result || m.detail_paragraph === nothing ||
            (ready && !m._detail_result_resolved)
             spans = Span[]
-            _detail_span!(
-                spans,
-                success ? "✓ Success" : "✗ Failed",
-                success ? :success : :error,
-                "Status:   ",
-            )
+            marker, outcome_style = _OUTCOME_MARKS[outcome]
+            _detail_span!(spans, "$marker $(_OUTCOME_LABELS[outcome])", outcome_style, "Status:   ")
             _detail_span!(spans, r.duration_str, :text, "Duration: ")
             _detail_span!(spans, Dates.format(r.timestamp, "HH:MM:SS"), :text, "Time:     ")
             sess_name = _session_display_name(r.session_key)

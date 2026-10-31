@@ -12,6 +12,7 @@ mutable struct EvalRecord
     code::String              # original code (truncated to 500 chars for storage)
     started_at::Float64       # time()
     finished_at::Float64      # 0.0 while running
+    cancel_requested_at::Float64  # time() of a cancel_eval request; 0.0 if none
     last_update::Float64      # time() of last stash/progress/stdout activity
     status::Symbol            # :running, :completed, :failed, :timeout, :promoted
     result_preview::String    # first 500 chars of formatted result (empty while running)

@@ -63,7 +63,16 @@ The Activity tab is a real-time feed of every tool call the MCP server has handl
 
 ![Activity tab](./assets/kaimon_activity.gif)
 
-The left pane shows a scrollable list of tool call records. Each entry shows the tool name, session target, timestamp, and result status (success or error).
+The left pane shows a scrollable list of tool call records. Each entry shows the tool name, session target, timestamp, and result status:
+
+| Marker | Meaning |
+|---|---|
+| ✓ | completed |
+| ✗ | failed |
+| ⊘ | cancelled |
+| ⏳ | a background job that is still running |
+
+A call that is still executing shows a spinner. An `ex` promoted to a background job shows the job's status, not the status of the call that promoted it.
 
 Select a record with `↑`/`↓` and press `Enter` to open the detail pane on the right, which shows the full input arguments, the return value, and any error message.
 

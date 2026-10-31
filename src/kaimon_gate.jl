@@ -698,7 +698,8 @@ function _reconcile_stale_jobs!(conn_mgr)
                     end
                     formatted = _format_gate_response(response, true, false, Ref(false), 6000)
                     preview = hasproperty(response, :value_repr) ? string(response.value_repr) : ""
-                    status = hasproperty(response, :exception) && response.exception !== nothing ? "failed" : "completed"
+                    status = isequal(get(job, "cancelled", 0), 1) ? "cancelled" :
+                             (hasproperty(response, :exception) && response.exception !== nothing ? "failed" : "completed")
                     Database.update_job!(eval_id;
                         status=status, result=formatted,
                         result_preview=first(preview, 500), finished_at=time())
@@ -898,11 +899,11 @@ function execute_via_gate_streaming(
                     isready(result_channel) ? take!(result_channel) : nothing
                 end
                 if res !== nothing
-                    status = if hasproperty(res, :exception) && res.exception !== nothing
-                        :failed
-                    else
-                        :completed
-                    end
+                    # A pending cancel request makes the terminal status
+                    # 'cancelled' (with the result), not completed/failed.
+                    status = _job_terminal_status(mgr, eval_id,
+                        hasproperty(res, :exception) && res.exception !== nothing)
+                    icon = status == :completed ? "✓" : status == :cancelled ? "⊘" : "✗"
                     formatted = _format_gate_response(res, show_return_value, quiet, was_stripped, max_output)
                     preview = if hasproperty(res, :value_repr)
                         string(res.value_repr)
@@ -919,22 +920,29 @@ function execute_via_gate_streaming(
                         finished_at = time())
                     elapsed = round(time() - promoted_at, digits=1)
                     _push_job_progress!(eval_id,
-                        "$(status == :completed ? "✓" : "✗") $status after $(elapsed)s")
+                        "$(icon) $status after $(elapsed)s")
                     _finish_job_inflight!(eval_id)
-                    _push_activity!(status == :completed ? :job_completed : :job_failed,
+                    # A stop the user asked for is its own outcome, not a failure.
+                    kind = status == :completed ? :job_completed :
+                           status == :cancelled ? :job_cancelled : :job_failed
+                    _push_activity!(kind,
                         "ex", dname,
-                        "$(status == :completed ? "✓" : "✗") Job $eval_id $status after $(elapsed)s";
-                        success = status == :completed)
+                        "$(icon) Job $eval_id $status after $(elapsed)s";
+                        # A requested stop is not a failure; the kind carries it.
+                        success = status != :failed)
                 end
             catch e
                 err_msg = sprint(showerror, e)
-                mgr !== nothing && _record_eval_done!(mgr, eval_id, :failed, err_msg)
+                status = _job_terminal_status(mgr, eval_id, true)
+                mgr !== nothing && _record_eval_done!(mgr, eval_id, status, err_msg)
                 Database.update_job!(eval_id;
-                    status = "failed", result = err_msg,
+                    status = string(status), result = err_msg,
                     result_preview = first(err_msg, 500), finished_at = time())
                 _finish_job_inflight!(eval_id)
-                _push_activity!(:job_failed, "ex", dname,
-                    "✗ Job $eval_id failed: $(first(err_msg, 80))"; success = false)
+                _push_activity!(status == :cancelled ? :job_cancelled : :job_failed,
+                    "ex", dname,
+                    "$(status == :cancelled ? "⊘" : "✗") Job $eval_id $(status): $(first(err_msg, 80))";
+                    success = status != :failed)
             end
         end
 
