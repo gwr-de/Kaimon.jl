@@ -62,7 +62,9 @@ function _refresh_search_health_async!(m::KaimonModel; force::Bool = false)
         collections = health.qdrant_up ? QdrantClient.list_collections() : String[]
         (
             qdrant_up = health.qdrant_up,
-            ollama_up = health.ollama_up,
+            embedder_up = health.embedder_up,
+            embedding_backend = health.embedding_backend,
+            embedding_where = health.embedding_where,
             model_available = health.model_available,
             collection_count = health.collection_count,
             collections = collections,
@@ -131,7 +133,7 @@ function _execute_search!(m::KaimonModel)
 
     spawn_task!(m._task_queue, :search_results) do
         # Pre-flight check
-        svc_err = _require_services(need_ollama = true, model = model)
+        svc_err = _require_services(need_embedder = true, model = model)
         if svc_err !== nothing
             return Dict[Dict(
                 "payload" => Dict(
@@ -147,7 +149,7 @@ function _execute_search!(m::KaimonModel)
             )]
         end
 
-        embedding = get_ollama_embedding(query_text; model = model)
+        embedding = get_embedding(query_text; model = model)
         if isempty(embedding)
             return Dict[Dict(
                 "payload" => Dict(
@@ -239,22 +241,46 @@ function _delete_search_collection!(m::KaimonModel)
     end
 end
 
-"""Pull the embedding model via Ollama in the background."""
+"""
+Get the embedding model in the background: Ollama pulls it, or for the llama.cpp backend the same
+model file is downloaded from Ollama's registry into the model directory.
+"""
 function _pull_embedding_model_async!(
     m::KaimonModel;
     model::String = m.search_embedding_model,
 )
-    if !m.search_ollama_up
+    if _MODEL_PULL[] !== nothing
+        _set_search_status!("Already pulling '$(_MODEL_PULL[].model)'")
+        return
+    end
+    started = time()
+    if m.search_embedding_backend === :llamacpp
+        _set_model_pull!((model = model, started, done = 0, total = 0))
+        _push_log!(:info, "Downloading '$model' from Ollama's registry into $(embedding_model_dir())")
+        spawn_task!(m._task_queue, :search_pull_model) do
+            try
+                download_embedding_model!(model;
+                    progress = (d, t) -> _set_model_pull!((model = model, started, done = d, total = t)))
+                (success = true, model = model, status = "success")
+            catch e
+                (success = false, model = model, status = sprint(showerror, e))
+            finally
+                _set_model_pull!(nothing)
+            end
+        end
+        return
+    end
+    if !m.search_embedder_up
         _set_search_status!("Cannot pull: Ollama not running")
         return
     end
-    _set_search_status!("Pulling model '$model'...")
+    _set_model_pull!((model = model, started, done = 0, total = 0))
     _push_log!(:info, "Pulling model '$model' via Ollama...")
     spawn_task!(m._task_queue, :search_pull_model) do
         try
             # ollama pull streams JSON — we just need the final status
             response = HTTP.post(
-                "http://localhost:11434/api/pull",
+                "$(ollama_url())/api/pull",
                 ["Content-Type" => "application/json"],
                 JSON.json(Dict("name" => model, "stream" => false));
                 request_timeout = 600,  # models can be large
@@ -264,6 +290,8 @@ function _pull_embedding_model_async!(
             (success = status == "success", model = model, status = status)
         catch e
             (success = false, model = model, status = sprint(showerror, e))
+        finally
+            _set_model_pull!(nothing)
         end
     end
 end
@@ -323,6 +351,53 @@ function _install_managed_qdrant_async!(m::KaimonModel)
     end
 end
 
+"""
+Switch the embedding backend and save it in search.json. Choosing llama.cpp installs it into its
+service environment first if needed. `KAIMON_EMBEDDING_BACKEND`, when set, still wins.
+"""
+function _set_embedding_backend!(m::KaimonModel, backend::Symbol)
+    cfg = load_search_config()
+    emb = get!(() -> Dict{String,Any}(), cfg, "embedding")
+    emb["backend"] = String(backend)
+    save_search_config(cfg)
+    name = backend === :llamacpp ? "llama.cpp" : "Ollama"
+    if embedding_backend() !== backend
+        _set_search_status!("Saved $name, but KAIMON_EMBEDDING_BACKEND overrides it")
+    else
+        _set_search_status!("Embedding backend: $name")
+        _push_log!(:info, "Embedding backend set to $name")
+    end
+    m.search_embedding_backend = embedding_backend()
+    if m.search_embedding_backend === :llamacpp && !llamacpp_installed()
+        _install_llamacpp_async!(m)
+    else
+        m.search_health_last_check = 0.0
+        _refresh_search_health_async!(m)
+    end
+end
+
+"""Install `llama_cpp_jll` into its service environment (subprocess), then load it in-process."""
+function _install_llamacpp_async!(m::KaimonModel)
+    _set_search_status!("Installing llama.cpp (downloading binary)...")
+    _push_log!(:info, "Installing llama_cpp_jll into Kaimon's service env — this downloads a binary artifact.")
+    cmd = llamacpp_install_command()
+    spawn_task!(m._task_queue, :search_install_llamacpp) do
+        io = IOBuffer()
+        installed = try
+            proc = run(pipeline(cmd; stdout = io, stderr = io); wait = false)
+            wait(proc)
+            proc.exitcode == 0
+        catch e
+            print(io, "\n", sprint(showerror, e))
+            false
+        end
+        loaded = installed && (try load_llamacpp_jll!() catch; false end)
+        out = String(take!(io))
+        tail = join(last(split(out, '\n'; keepempty = false), 12), "\n")
+        (installed = installed, loaded = loaded, output = tail)
+    end
+end
+
 """Stop the managed Qdrant child and disable auto-launch (persist mode=off)."""
 function _disable_managed_qdrant!(m::KaimonModel)
     disable_managed_qdrant!()
@@ -377,7 +452,12 @@ function _open_search_config!(m::KaimonModel)
         label = "Model: ", tick = m.tick)
     m.search_config_custom_editing = false
 
-    # Fire async task to check Ollama availability + collection info
+    _refresh_search_config_info!(m)
+end
+
+"""Re-read which models the backend has and the selected collection's info, in the background."""
+function _refresh_search_config_info!(m::KaimonModel)
+    model_names = sort!(collect(keys(EMBEDDING_CONFIGS)))
     col_name = if !isempty(m.search_collections)
         sel = clamp(m.search_selected_collection, 1, length(m.search_collections))
         m.search_collections[sel]
@@ -385,14 +465,14 @@ function _open_search_config!(m::KaimonModel)
         ""
     end
     spawn_task!(m._task_queue, :search_config_info) do
-        installed_models = list_ollama_models()
+        installed_models = list_embedding_models()
         models = [
             (
                 name = n,
                 dims = EMBEDDING_CONFIGS[n].dims,
                 ctx = EMBEDDING_CONFIGS[n].context_tokens,
                 installed = any(
-                    im -> im == n || startswith(im, split(n, ":")[1]),
+                    im -> _model_matches(im, n),
                     installed_models,
                 ),
             ) for n in model_names
@@ -407,6 +487,41 @@ function _open_search_config!(m::KaimonModel)
             Dict()
         end
         (models = models, col_info = col_info)
+    end
+end
+
+"""
+`[x]` on a model in the config panel: the first press asks, the second removes it from the current
+backend — Ollama deletes it, or for llama.cpp Kaimon's downloaded copy is deleted (a file in Ollama's
+store is left to Ollama).
+"""
+function _remove_selected_model!(m::KaimonModel)
+    n = length(m.search_config_models)
+    n == 0 && return
+    entry = m.search_config_models[clamp(m.search_config_selected, 1, n)]
+    model = entry.name
+    if model == "Custom..." || !entry.installed
+        m.search_config_remove_confirm = ""
+        return _set_search_status!("'$model' is not installed")
+    end
+    if m.search_config_remove_confirm != model
+        m.search_config_remove_confirm = model
+        return
+    end
+    m.search_config_remove_confirm = ""
+    backend = m.search_embedding_backend
+    _set_search_status!("Removing '$model'...")
+    spawn_task!(m._task_queue, :search_remove_model) do
+        if backend === :llamacpp
+            removed = try; remove_downloaded_model!(model); catch; false; end
+            note = removed ? "" :
+                   ollama_store_model_file(model) !== nothing ?
+                   "it is in Ollama's store; remove it with Ollama (switch with [b])" : "no downloaded copy"
+            (model = model, removed = removed, note = note)
+        else
+            removed = remove_ollama_model(model)
+            (model = model, removed = removed, note = removed ? "" : "Ollama did not remove it")
+        end
     end
 end
 
@@ -431,6 +546,9 @@ function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
         end
         return
     end
+
+    # A pending removal waits for a second [x]; any other key cancels it.
+    (evt.key == :char && evt.char == 'x') || (m.search_config_remove_confirm = "")
 
     @match evt.key begin
         :escape => begin
@@ -466,7 +584,16 @@ function _handle_search_config_key!(m::KaimonModel, evt::KeyEvent)
             end
         end
         :char => begin
-            if evt.char == '+' || evt.char == '='
+            if evt.char == 'x'
+                _remove_selected_model!(m)
+            elseif evt.char == 'b'
+                # On llama.cpp that isn't installed yet, [b] installs it; otherwise it switches.
+                if m.search_embedding_backend === :llamacpp && !m.search_embedder_up
+                    _install_llamacpp_async!(m)
+                else
+                    _set_embedding_backend!(m, m.search_embedding_backend === :llamacpp ? :ollama : :llamacpp)
+                end
+            elseif evt.char == '+' || evt.char == '='
                 m.search_result_count = min(50, m.search_result_count + 1)
             elseif evt.char == '-'
                 m.search_result_count = max(1, m.search_result_count - 1)

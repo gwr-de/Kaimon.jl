@@ -257,6 +257,60 @@ function _matched_lines(text::AbstractString, start_line::Int, toks::Vector{<:Ab
     return out
 end
 
+# Cross-project semantic search. Qdrant searches one collection per request, so every collection
+# Kaimon indexed is searched in parallel: the query is embedded once per model those collections
+# were built with, and the hits are merged by score (cosine similarity within one model). A
+# collection with no recorded model was not indexed by Kaimon, or predates model stamping, and is
+# skipped. A model the backend lacks skips its collections, with a note.
+"`model => collections` for a cross-project search over `collections`, given each one's recorded model."
+function _cross_project_groups(collections, models::AbstractDict, explicit_model;
+                               legacy::AbstractString = global_collection_name())
+    groups = Dict{String,Vector{String}}()
+    for c in collections
+        c == legacy && continue
+        m = get(models, c, nothing)
+        m === nothing && continue
+        # An explicit model only applies to collections built with it: other vectors live in
+        # another space and would return noise.
+        (explicit_model !== nothing && String(m) != explicit_model) && continue
+        push!(get!(groups, String(m), String[]), c)
+    end
+    return groups
+end
+
+function _cross_project_semantic(query::AbstractString, collections, explicit_model, fetch::Int,
+                                 filter, notes::Vector{String})::Vector{HybridHit}
+    models = get(load_search_config(), "collection_models", Dict())
+    groups = _cross_project_groups(collections, models, explicit_model)
+    scored = Tuple{Float64,HybridHit}[]
+    lk = ReentrantLock()
+    for (model, cols) in groups
+        if !ping_embedder() || !embedding_model_available(model)
+            push!(notes, "$(embedder_name()) has no '$model' — $(length(cols)) collection(s) searched lexically only.")
+            continue
+        end
+        emb = get_embedding(String(query); model = model)
+        if isempty(emb)
+            push!(notes, "Embedding with '$model' failed — $(length(cols)) collection(s) searched lexically only.")
+            continue
+        end
+        # Measured against a local Qdrant, more than a few concurrent searches gains nothing.
+        asyncmap(cols; ntasks = 4) do c
+            res = try; QdrantClient.search(c, emb; limit = fetch, filter = filter); catch; []; end
+            (length(res) == 1 && haskey(first(res), "error")) && return nothing
+            hits = _semantic_hits(res)
+            lock(lk) do
+                for (r, h) in zip(res, hits)
+                    push!(scored, (Float64(get(r, "score", 0.0)), h))
+                end
+            end
+            nothing
+        end
+    end
+    sort!(scored; by = first, rev = true)
+    return HybridHit[h for (_, h) in scored[1:min(fetch, length(scored))]]
+end
+
 function _format_hybrid(query, where_label, hits::Vector{HybridHit},
                         cross_project::Bool, notes::Vector{String}, mode::String)
     out = "🔍 \"$query\" in $where_label" * (mode == "hybrid" ? "" : " [$mode]") * ":\n"
@@ -371,15 +425,12 @@ function _qdrant_search_code(args)
     # ── Resolve the collection (Qdrant-backed; also scopes the lexical search) ──
     sem_collection = nothing          # Qdrant collection for vector search
     fts_collection = nothing          # FTS collection (nothing ⇒ all, cross-project)
-    if QdrantClient.ping()
+    collections = String[]
+    qdrant_up = QdrantClient.ping()
+    if qdrant_up
         collections = QdrantClient.list_collections()
         if cross_project
-            gc = global_collection_name()
-            if gc ∉ collections
-                try; populate_global_collection!(; verbose = false); catch; end
-                collections = QdrantClient.list_collections()
-            end
-            sem_collection = gc ∈ collections ? gc : nothing
+            # Every Kaimon collection is searched (`_cross_project_semantic`); none is named here.
             fts_collection = nothing
         else
             raw = get(args, "collection", nothing)
@@ -414,13 +465,17 @@ function _qdrant_search_code(args)
 
     # ── Semantic ──
     sem = HybridHit[]
-    if want_semantic && sem_collection !== nothing
+    if want_semantic && cross_project && qdrant_up
+        sem = _cross_project_semantic(query, collections, explicit_model, fetch,
+                                      _build_qdrant_filter(chunk_type, filters), notes)
+        mode == "semantic" && isempty(sem) && !isempty(notes) && return "Error: " * join(notes, " ")
+    elseif want_semantic && sem_collection !== nothing
         model = something(explicit_model, resolve_search_model(sem_collection))
-        if !ping_ollama() || !check_ollama_model(model)
-            mode == "semantic" && return _require_services(need_ollama = true, model = model)
-            push!(notes, "Embeddings unavailable (Ollama/model) — lexical results only.")
+        if !ping_embedder() || !embedding_model_available(model)
+            mode == "semantic" && return _require_services(need_embedder = true, model = model)
+            push!(notes, "Embeddings unavailable ($(embedder_name()) has no '$model') — lexical results only.")
         else
-            embedding = get_ollama_embedding(query; model = model)
+            embedding = get_embedding(query; model = model)
             if isempty(embedding)
                 mode == "semantic" && return "Error: Failed to generate embedding with model '$model'."
                 push!(notes, "Embedding failed — lexical results only.")

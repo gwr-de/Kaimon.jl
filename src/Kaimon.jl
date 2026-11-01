@@ -46,6 +46,23 @@ Kaimon.KaimonGate.serve($serve_args)
 # tool-authoring macro and type; everything else is accessible as Kaimon.foo().
 export @mcp_tool, MCPTool
 
+# ── Platform directories ──────────────────────────────────────────────────────
+# The base directories every location below is built from. An empty variable counts as unset.
+
+_env_dir(var::AbstractString, default::AbstractString) = (v = get(ENV, var, ""); isempty(v) ? default : v)
+
+"`XDG_CACHE_HOME`, else `~/.cache`."
+xdg_cache_home() = _env_dir("XDG_CACHE_HOME", joinpath(homedir(), ".cache"))
+
+"`XDG_CONFIG_HOME`, else `~/.config`."
+xdg_config_home() = _env_dir("XDG_CONFIG_HOME", joinpath(homedir(), ".config"))
+
+"Windows' local application-data directory: `LOCALAPPDATA`, else `~/AppData/Local`."
+windows_localappdata() = _env_dir("LOCALAPPDATA", joinpath(homedir(), "AppData", "Local"))
+
+"Windows' roaming application-data directory: `APPDATA`, else `~/AppData/Roaming`."
+windows_appdata() = _env_dir("APPDATA", joinpath(homedir(), "AppData", "Roaming"))
+
 # ── Shared cache directory ────────────────────────────────────────────────────
 # Single source of truth for ~/.cache/kaimon (respects XDG_CACHE_HOME).
 # All operational files (logs, sockets, sessions, db, pid files) go here.
@@ -66,12 +83,9 @@ function kaimon_cache_dir()
     dir = if !isempty(explicit)
         explicit
     elseif Sys.iswindows()
-        joinpath(
-            get(ENV, "LOCALAPPDATA", joinpath(homedir(), "AppData", "Local")),
-            "Kaimon",
-        )
+        joinpath(windows_localappdata(), "Kaimon")
     else
-        joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimon")
+        joinpath(xdg_cache_home(), "kaimon")
     end
     mkpath(dir)
     return dir
@@ -96,16 +110,27 @@ function kaimon_config_dir()
     dir = if !isempty(explicit)
         explicit
     elseif Sys.iswindows()
-        joinpath(
-            get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")),
-            "Kaimon",
-        )
+        joinpath(windows_appdata(), "Kaimon")
     else
-        joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimon")
+        joinpath(xdg_config_home(), "kaimon")
     end
     mkpath(dir)
     return dir
 end
+
+# ── Other applications' directories ───────────────────────────────────────────
+# Where the clients Kaimon registers with keep their configuration. One definition each, so the
+# code that writes Kaimon into a client's config and the code that reads it look in the same place.
+
+"VS Code's user directory, holding `settings.json`, `mcp.json` and `globalStorage`."
+function vscode_user_dir()
+    Sys.isapple() && return joinpath(homedir(), "Library", "Application Support", "Code", "User")
+    Sys.iswindows() && return joinpath(windows_appdata(), "Code", "User")
+    return joinpath(xdg_config_home(), "Code", "User")
+end
+
+"opencode's configuration directory. opencode follows `XDG_CONFIG_HOME` on every platform."
+opencode_config_dir() = joinpath(xdg_config_home(), "opencode")
 
 # ── LOAD_PATH assembly ────────────────────────────────────────────────────────
 # `JULIA_LOAD_PATH` is parsed like `PATH`: entries are split on the OS path-list
@@ -138,7 +163,9 @@ include("utils.jl")
 include("database.jl")
 include("fts_index.jl")   # lexical (SQLite/FTS5) half of hybrid code search
 include("qdrant_client.jl")
+include("search_services.jl") # search settings, per-account ports, private service records
 include("qdrant_server.jl")   # managed Qdrant child-process launcher (opt-in via Qdrant_jll)
+include("llamacpp_server.jl") # managed llama.cpp embedding server (opt-in via llama_cpp_jll)
 include("tools.jl")
 include("Generate.jl")
 include("gate_prefs.jl")
@@ -227,6 +254,11 @@ function __init__()
     # precompile-baked placeholder; see tui/io.jl).
     _SERVER_START_TIME[] = Dates.now()
 
+    # The Qdrant client asks Kaimon where Qdrant is and which key it takes (search settings, then
+    # the managed instance's record). Installed at runtime: a function in a precompiled Ref would
+    # be baked into the image.
+    QdrantClient.ENDPOINT[] = qdrant_endpoint
+
     # Wire Kaimon's host integrations into KaimonGate. Standalone, the gate uses
     # safe defaults; here we give it Kaimon's version, personality, REPL-mirror
     # preference, Tachikoma (for TTY hand-off on restart), and a restart preamble
@@ -257,6 +289,7 @@ function __init__()
 
     # Reap a Kaimon-managed Qdrant child (if we spawned one) when the process exits.
     atexit(shutdown_qdrant!)
+    atexit(shutdown_llamacpp!)
 
     # Auto-start TCP gate if configured via env vars or kaimon.toml [gate]
     KaimonGate._auto_serve!()

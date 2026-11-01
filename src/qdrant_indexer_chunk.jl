@@ -156,17 +156,19 @@ function extract_definition!(
         while prev_line >= 1 && isempty(strip(lines[prev_line]))
             prev_line -= 1
         end
-        if prev_line >= 1 && endswith(strip(lines[prev_line]), "\"\"\"")
-            # Find start of docstring
+        prev = prev_line >= 1 ? strip(lines[prev_line]) : ""
+        if endswith(prev, "\"\"\"")
+            # Find start of docstring. A one-line docstring opens on its own closing line.
             doc_end = prev_line
             doc_start = prev_line
-            while doc_start > 1
+            one_line = length(prev) >= 6 && startswith(prev, "\"\"\"")
+            while !one_line && doc_start > 1
                 doc_start -= 1
                 if startswith(strip(lines[doc_start]), "\"\"\"")
                     break
                 end
             end
-            if doc_start < doc_end
+            if one_line || doc_start < doc_end
                 docstring = join(lines[doc_start:doc_end], "\n")
                 text = docstring * "\n" * text
                 start_line = doc_start
@@ -600,7 +602,7 @@ function split_chunk_recursive(chunk::Dict, max_length::Int, model::String, dept
 
     # Try to embed the chunk as-is if it's within size limit
     if length(text) <= max_length
-        embedding = get_ollama_embedding(text; model=model)
+        embedding = get_embedding(text; model=model)
         if !isempty(embedding)
             # Success - return chunk with embedding
             return [merge(chunk, Dict("embedding" => embedding, "text" => text))]
@@ -614,7 +616,7 @@ function split_chunk_recursive(chunk::Dict, max_length::Int, model::String, dept
         # Can't split further - just truncate
         with_index_logger(() -> @warn "Cannot split chunk further, truncating" file = chunk["file"] start_line = chunk["start_line"] original_length = length(text))
         truncated = first(text, max_length)
-        embedding = get_ollama_embedding(truncated; model=model)
+        embedding = get_embedding(truncated; model=model)
         if !isempty(embedding)
             return [merge(chunk, Dict("embedding" => embedding, "text" => truncated))]
         else

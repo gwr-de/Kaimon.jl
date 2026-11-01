@@ -65,7 +65,8 @@ Send a tool call to the extension's gate session. Blocks until response.
 function ext_panel_request(ctx::ExtPanelContext, tool_name::String, args::Dict=Dict{String,Any}())
     isempty(ctx.session_key) && return "Error: extension not connected"
     ctx.conn_mgr === nothing && return "Error: no connection manager"
-    conn = get_connection_by_key(ctx.conn_mgr, ctx.session_key)
+    # The panel's own extension, which the resolver hides from agents by default.
+    conn = get_connection_by_key(ctx.conn_mgr, ctx.session_key; include_extensions = true)
     conn === nothing && return "Error: extension session not found"
     _call_session_tool(conn, tool_name, args)
 end
@@ -79,7 +80,8 @@ Returns `(stdout, stderr, value_repr, ...)` — see `eval_remote` for full shape
 function ext_panel_eval(ctx::ExtPanelContext, code::String)
     isempty(ctx.session_key) && return (stdout="", stderr="Error: extension not connected", value_repr="")
     ctx.conn_mgr === nothing && return (stdout="", stderr="Error: no connection manager", value_repr="")
-    conn = get_connection_by_key(ctx.conn_mgr, ctx.session_key)
+    # The panel's own extension, which the resolver hides from agents by default.
+    conn = get_connection_by_key(ctx.conn_mgr, ctx.session_key; include_extensions = true)
     conn === nothing && return (stdout="", stderr="Error: extension session not found", value_repr="")
     eval_remote(conn, code)
 end

@@ -2,7 +2,10 @@
 Qdrant Vector Database Client
 
 Simple HTTP client for interacting with Qdrant vector database.
-Assumes Qdrant is running locally (e.g., via Docker).
+
+Where Qdrant is, and the API key it takes, come from `ENDPOINT[]`, which Kaimon installs: it answers
+from the search settings and the managed instance's record (`qdrant_endpoint`). The answer is
+cached for a few seconds, since indexing makes many requests.
 """
 module QdrantClient
 
@@ -11,21 +14,57 @@ using JSON
 
 # Qdrant server configuration
 const QDRANT_URL = Ref("http://localhost:6333")
+const API_KEY = Ref("")
+const ENDPOINT = Ref{Any}(nothing)   # () -> (url, key); installed by Kaimon
+const _RESOLVED_AT = Ref(0.0)
+const _RESOLVE_S = 5.0
 
 """
     set_url(url::String)
 
-Set the Qdrant server URL (default: http://localhost:6333).
+Set the Qdrant server URL (default: http://localhost:6333). An installed `ENDPOINT` resolver
+replaces it on its next refresh.
 """
 function set_url(url::String)
     QDRANT_URL[] = url
 end
 
+"The Qdrant base URL, refreshed from `ENDPOINT[]` when the cached answer is older than `_RESOLVE_S`."
+function endpoint()
+    f = ENDPOINT[]
+    if f !== nothing && time() - _RESOLVED_AT[] > _RESOLVE_S
+        try
+            url, key = f()
+            QDRANT_URL[] = url
+            API_KEY[] = key
+        catch e
+            @debug "Qdrant endpoint resolution failed" exception = e
+        end
+        _RESOLVED_AT[] = time()
+    end
+    return QDRANT_URL[]
+end
+
+"Make the next request re-resolve the endpoint (after starting or stopping a managed instance)."
+refresh!() = (_RESOLVED_AT[] = 0.0; nothing)
+
+"Point the client at `url` with `key` now, as the resolver would."
+configure!(url::AbstractString, key::AbstractString) =
+    (QDRANT_URL[] = String(url); API_KEY[] = String(key); _RESOLVED_AT[] = time(); nothing)
+
+"Request headers: the API key when there is one, then `extra`."
+_hdrs(extra::Pair...) = isempty(API_KEY[]) ? Pair{String,String}[extra...] :
+                         Pair{String,String}["api-key" => API_KEY[], extra...]
+
+_json_hdrs() = _hdrs("Content-Type" => "application/json")
+
+_get(path::AbstractString; kw...) = HTTP.get("$(endpoint())$path", _hdrs(); kw...)
+
 # Every POST used here (search, scroll, count, delete by id or filter) is safe to repeat,
 # so let HTTP.jl retry it as it would a GET. Otherwise a pooled keep-alive connection
 # that Qdrant closed while idle fails the request with ECONNRESET instead of reconnecting.
-_post(path::AbstractString, body) = HTTP.post("$(QDRANT_URL[])$path",
-    ["Content-Type" => "application/json"], JSON.json(body); retry_non_idempotent = true)
+_post(path::AbstractString, body) = HTTP.post("$(endpoint())$path",
+    _json_hdrs(), JSON.json(body); retry_non_idempotent = true)
 
 """
     list_collections() -> Vector{String}
@@ -34,7 +73,7 @@ List all collections in the Qdrant instance.
 """
 function list_collections()
     try
-        response = HTTP.get("$(QDRANT_URL[])/collections")
+        response = _get("/collections")
         data = JSON.parse(String(response.body))
 
         if haskey(data, "result") && haskey(data["result"], "collections")
@@ -54,7 +93,7 @@ Get information about a specific collection.
 """
 function get_collection_info(collection::String)
     try
-        response = HTTP.get("$(QDRANT_URL[])/collections/$(collection)")
+        response = _get("/collections/$(collection)")
         data = JSON.parse(String(response.body))
         return get(data, "result", Dict())
     catch e
@@ -174,7 +213,7 @@ Retrieve a specific point by ID.
 """
 function get_point(collection::String, point_id)
     try
-        response = HTTP.get("$(QDRANT_URL[])/collections/$(collection)/points/$(point_id)")
+        response = _get("/collections/$(collection)/points/$(point_id)")
         data = JSON.parse(String(response.body))
         return get(data, "result", Dict())
     catch e
@@ -182,6 +221,29 @@ function get_point(collection::String, point_id)
             e
         return Dict("error" => _friendly_error(e))
     end
+end
+
+"""
+    point_payload_field(collection, ids, field) -> Dict{String,Any}
+
+The payload `field` of each point among `ids` that exists, keyed by ID (`nothing` where a point lacks
+the field). Empty on any failure, so a caller treats every point as missing.
+"""
+function point_payload_field(collection::String, ids::AbstractVector, field::String)
+    out = Dict{String,Any}()
+    isempty(ids) && return out
+    try
+        body = Dict("ids" => map(_coerce_point_id, ids), "with_payload" => [field], "with_vector" => false)
+        data = JSON.parse(String(_post("/collections/$(collection)/points", body).body))
+        for p in get(data, "result", [])
+            pl = get(p, "payload", nothing)
+            out[string(p["id"])] = pl isa AbstractDict ? get(pl, field, nothing) : nothing
+        end
+    catch e
+        @debug "Point lookup failed" collection = collection exception = e
+        empty!(out)
+    end
+    return out
 end
 
 """Transient connection failures worth retrying for an idempotent request — a stale
@@ -230,8 +292,8 @@ function upsert_points(collection::String, points::Vector{Dict})
 
         response = _with_http_retry() do
             HTTP.put(
-                "$(QDRANT_URL[])/collections/$(collection)/points",
-                ["Content-Type" => "application/json"],
+                "$(endpoint())/collections/$(collection)/points",
+                _json_hdrs(),
                 JSON.json(body),
             )
         end
@@ -251,7 +313,7 @@ Delete a collection.
 """
 function delete_collection(collection::String)
     try
-        response = HTTP.delete("$(QDRANT_URL[])/collections/$(collection)")
+        response = HTTP.delete("$(endpoint())/collections/$(collection)", _hdrs())
         data = JSON.parse(String(response.body))
         return get(data, "result", false) == true
     catch e
@@ -274,8 +336,8 @@ function create_collection(
         body = Dict("vectors" => Dict("size" => vector_size, "distance" => distance))
 
         response = HTTP.put(
-            "$(QDRANT_URL[])/collections/$(collection)",
-            ["Content-Type" => "application/json"],
+            "$(endpoint())/collections/$(collection)",
+            _json_hdrs(),
             JSON.json(body),
         )
 
@@ -411,18 +473,30 @@ function count_by_file(collection::String, file_path::String)
 end
 
 """
-    ping() -> Bool
+    probe() -> Symbol
 
-Check if Qdrant is reachable. Returns true if /healthz returns 200.
+`:ok` when Qdrant answers a request that needs the API key, `:refused` when it answers but rejects
+the key (it is not the instance this key belongs to), `:down` otherwise. `/healthz` is no use for
+this: Qdrant serves it without a key.
 """
-function ping()
+function probe()::Symbol
     try
-        response = HTTP.get("$(QDRANT_URL[])/healthz"; connect_timeout = 2, request_timeout = 3)
-        return response.status == 200
+        r = _get("/collections"; connect_timeout = 2, request_timeout = 3,
+                 status_exception = false, retry = false)
+        r.status == 200 && return :ok
+        r.status in (401, 403) && return :refused
+        return :down
     catch
-        return false
+        return :down
     end
 end
+
+"""
+    ping() -> Bool
+
+Check if Qdrant is reachable and accepts our API key.
+"""
+ping() = probe() === :ok
 
 """
     _friendly_error(e) -> String
@@ -439,6 +513,8 @@ function _friendly_error(e)
         status = e.status
         if status == 404
             return "Collection not found (404)"
+        elseif status in (401, 403)
+            return "Qdrant at $(QDRANT_URL[]) rejected the API key ($status)"
         elseif status == 400
             return "Bad request to Qdrant (400): $(first(msg, 200))"
         else

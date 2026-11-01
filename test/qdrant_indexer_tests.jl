@@ -73,6 +73,27 @@ using Kaimon
         end
     end
 
+    @testset "only chunks without a vector from this model are embedded" begin
+        prepared = Tuple{Dict,String}[(Dict("text" => "a"), "p1"), (Dict("text" => "b"), "p2"),
+                                      (Dict("text" => "c"), "p3"), (Dict("text" => "d"), "p4")]
+        # p1 stored with this model; p2 with another; p3 before the model was recorded; p4 missing.
+        have = Dict{String,Any}("p1" => "qwen3-embedding:0.6b", "p2" => "embeddinggemma:latest", "p3" => nothing)
+        todo = Kaimon._needs_embedding(prepared, have, "qwen3-embedding:0.6b")
+        @test [pid for (_, pid) in todo] == ["p2", "p3", "p4"]
+        @test length(Kaimon._needs_embedding(prepared, Dict{String,Any}(), "m")) == 4
+    end
+
+    @testset "extract_definitions - one-line docstrings stay with their own definition" begin
+        code = "\"\"\"First.\"\"\"\nfunction a()\n    1\nend\n\n\"\"\"Second.\"\"\"\nfunction b()\n    2\nend\n\n\"\"\"\nThird.\n\"\"\"\nc() = 3\n"
+        chunks = Kaimon.extract_definitions(code, "test.jl")
+        byname = Dict(c["name"] => c for c in chunks)
+        @test (byname["a"]["start_line"], byname["a"]["end_line"]) == (1, 4)
+        @test (byname["b"]["start_line"], byname["b"]["end_line"]) == (6, 9)
+        @test startswith(byname["b"]["text"], "\"\"\"Second.\"\"\"")
+        @test !occursin("First", byname["b"]["text"])
+        @test (byname["c"]["start_line"], byname["c"]["end_line"]) == (11, 14)
+    end
+
     @testset "extract_definitions - nested in module" begin
         code = """
         module MyMod

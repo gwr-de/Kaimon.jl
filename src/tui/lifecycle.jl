@@ -160,7 +160,7 @@ function _auto_index_project!(project_path::String)
         try
             # Check search services health
             health = check_search_health()
-            if !health.qdrant_up || !health.ollama_up || !health.model_available
+            if !health.qdrant_up || !health.embedder_up || !health.model_available
                 return
             end
 

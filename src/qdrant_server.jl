@@ -15,6 +15,11 @@
 #     app, a dev checkout, or a plain environment.
 # Core owns the policy, the lifecycle, and the storage/log paths; the service env
 # owns only the binary artifact.
+#
+# A managed instance binds to loopback and takes an API key generated at each launch, so on a
+# shared machine other accounts cannot use or read the index, and Kaimon never mistakes another
+# account's Qdrant for its own. Its port, key and owner are in a private record beside the storage
+# (see search_services.jl); one machine at a time serves a given storage directory.
 
 const PREF_QDRANT_MANAGED = "qdrant_managed"
 
@@ -33,6 +38,7 @@ const _QDRANT_JLL_MOD = Ref{Any}(nothing)
 # The child process we started (if any), so we can health-check and reap it.
 const _QDRANT_PROC = Ref{Any}(nothing)
 const _QDRANT_LOCK = ReentrantLock()
+const _QDRANT_HEARTBEAT = Ref{Any}(nothing)   # Timer refreshing our record while the child runs
 
 # ── Policy ────────────────────────────────────────────────────────────────────
 
@@ -97,19 +103,34 @@ enable_managed_qdrant!()::Symbol = set_qdrant_managed_mode!(:auto)
 """The Kaimon-owned environment that holds the Qdrant binary (`Qdrant_jll`)."""
 qdrant_service_env() = mkpath(joinpath(kaimon_cache_dir(), "service-env"))
 
-"""Directory holding the managed Qdrant's on-disk storage (collections, snapshots)."""
-qdrant_storage_dir() = mkpath(joinpath(kaimon_cache_dir(), "qdrant", "storage"))
+"""Directory holding the managed Qdrant's on-disk storage (collections), private to this account."""
+qdrant_storage_dir() = private_dir(joinpath(private_dir(qdrant_storage_root()), "storage"))
 
-"""Path to the managed Qdrant's log file (stdout+stderr)."""
-qdrant_log_path() = joinpath(mkpath(joinpath(kaimon_cache_dir(), "qdrant")), "qdrant.log")
+"""Path to the managed Qdrant's log file (stdout+stderr) on this machine."""
+qdrant_log_path() = joinpath(private_dir(qdrant_storage_root()), "qdrant-$(gethostname()).log")
 
-"""Size past which the managed Qdrant log is rotated to `qdrant.log.1` at spawn."""
-const _QDRANT_LOG_ROTATE_BYTES = 32 * 1024^2
+"""The managed instance's record: host, pid, port, API key and heartbeat (see `ServiceRecord`)."""
+qdrant_record_path() = joinpath(qdrant_storage_root(), "server.json")
 
-"""The HTTP port the managed Qdrant should bind, parsed from the configured URL (default 6333)."""
-function _qdrant_http_port()::Int
-    m = match(r":(\d+)(?:/|$)", QdrantClient.QDRANT_URL[])
-    m === nothing ? 6333 : parse(Int, m.captures[1])
+"""
+    qdrant_endpoint() -> (url, key)
+
+Where Kaimon's Qdrant is and the key it takes, installed as `QdrantClient.ENDPOINT`:
+
+1. a Qdrant the user configured (`qdrant.url`, with `qdrant.api_key`);
+2. the managed instance recorded for this machine;
+3. otherwise the configured port on loopback, for a Qdrant the user started there (a container).
+   On Linux one owned by another account is not used: an unroutable address is returned instead,
+   so it reads as down and a managed instance can be started.
+"""
+function qdrant_endpoint()::Tuple{String,String}
+    ext = qdrant_url_setting()
+    isempty(ext) || return (String(rstrip(ext, '/')), qdrant_api_key_setting())
+    r = read_service_record(qdrant_record_path())
+    (r !== nothing && record_live_here(r)) && return ("http://127.0.0.1:$(r.port)", r.key)
+    port = qdrant_port_setting()
+    loopback_listener_ok(port) || return ("http://127.0.0.1:0", "")
+    return ("http://127.0.0.1:$port", "")
 end
 
 # ── Installation / activation ─────────────────────────────────────────────────
@@ -127,7 +148,7 @@ function qdrant_install_command()::Cmd
     # future bumps automatically). `_QDRANT_JLL_MIN` documents the floor we've tested.
     code = "import Pkg; Pkg.activate(raw\"$env\"); " *
            "Pkg.add(Pkg.PackageSpec(name=\"Qdrant_jll\"))"
-    return `$(Base.julia_cmd()) --startup-file=no --color=no -e $code`
+    return service_julia_cmd(`$(Base.julia_cmd()) --startup-file=no --color=no -e $code`)
 end
 
 """True if the Qdrant binary is installed in the service env (or already loaded)."""
@@ -166,20 +187,15 @@ end
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 """Launch the bundled Qdrant binary. Assumes `_QDRANT_JLL_MOD` is loaded."""
-function _spawn_managed_qdrant(; storage_path::String, http_port::Int, log_path::String)
+function _spawn_managed_qdrant(; storage_path::String, http_port::Int, grpc_port::Int,
+                               api_key::String, log_path::String)
     mod = _QDRANT_JLL_MOD[]
     mod === nothing && error("Qdrant_jll is not loaded")
-    env = copy(ENV)
-    env["QDRANT__SERVICE__HTTP_PORT"] = string(http_port)
-    env["QDRANT__SERVICE__GRPC_PORT"] = string(http_port + 1)  # Kaimon only uses HTTP
-    env["QDRANT__STORAGE__STORAGE_PATH"] = storage_path
-    env["QDRANT__STORAGE__SNAPSHOTS_PATH"] = joinpath(dirname(storage_path), "snapshots")
-    env["QDRANT__TELEMETRY_DISABLED"] = "true"
+    env = _qdrant_env(; storage_path, http_port, grpc_port, api_key)
     # `qdrant()` was defined by a just-loaded module — reach it past the current world.
     qdrant_cmd = Base.invokelatest(mod.qdrant)::Cmd
-    # Qdrant logs every request, so keep one previous log rather than appending forever.
-    filesize(log_path) > _QDRANT_LOG_ROTATE_BYTES && mv(log_path, log_path * ".1"; force = true)
-    logio = open(log_path, "a")
+    # Qdrant logs every request, so the log is rotated rather than appended to forever.
+    logio = open_service_log(log_path)
     # Run with the cache dir as the working directory. Qdrant writes a
     # `.qdrant-initialized` marker (and any other cwd-relative files) into its
     # working dir; without this it inherits the launching process's cwd — e.g. the
@@ -189,27 +205,30 @@ function _spawn_managed_qdrant(; storage_path::String, http_port::Int, log_path:
                         stdin = devnull, stdout = logio, stderr = logio); wait = false)
 end
 
+"""
+The managed Qdrant's environment: loopback only, the launch's API key (which also guards gRPC,
+unused by Kaimon but served anyway), and storage under the private root.
+"""
+function _qdrant_env(; storage_path::String, http_port::Int, grpc_port::Int, api_key::String)
+    env = copy(ENV)
+    env["QDRANT__SERVICE__HOST"] = "127.0.0.1"
+    env["QDRANT__SERVICE__HTTP_PORT"] = string(http_port)
+    env["QDRANT__SERVICE__GRPC_PORT"] = string(grpc_port)
+    env["QDRANT__SERVICE__API_KEY"] = api_key
+    env["QDRANT__STORAGE__STORAGE_PATH"] = storage_path
+    env["QDRANT__STORAGE__SNAPSHOTS_PATH"] = private_dir(joinpath(dirname(storage_path), "snapshots"))
+    env["QDRANT__TELEMETRY_DISABLED"] = "true"
+    return env
+end
+
 """True if the managed child we started (this session) is still alive."""
 _qdrant_child_alive() =
     (_QDRANT_PROC[] isa Base.Process) && Base.process_running(_QDRANT_PROC[])
 
-# In-memory handles (`_QDRANT_PROC`) don't survive a code reload or a process
-# restart, so we ALSO record the child's PID in a file. That makes "is a
-# Kaimon-managed Qdrant running, and is it ours to stop?" answerable across
-# reloads/restarts — otherwise a managed instance from a prior session looks like
-# an unowned Qdrant and its controls vanish.
-
-_qdrant_pid_file() = joinpath(mkpath(joinpath(kaimon_cache_dir(), "qdrant")), "qdrant.pid")
-
-function _write_qdrant_pid(pid::Integer)
-    try; write(_qdrant_pid_file(), string(pid)); catch; end
-end
-
-function _read_qdrant_pid()::Union{Int,Nothing}
-    f = _qdrant_pid_file()
-    isfile(f) || return nothing
-    return tryparse(Int, strip(read(f, String)))
-end
+# In-memory handles (`_QDRANT_PROC`) don't survive a code reload or a process restart, so the
+# instance is also described by its record (`qdrant_record_path`). That makes "is a
+# Kaimon-managed Qdrant running, and is it ours to stop?" answerable across reloads and restarts,
+# and across the machines that share a home directory.
 
 """
     _proc_pid(proc) -> Union{Int,Nothing}
@@ -254,16 +273,16 @@ end
 """
     managed_qdrant_running() -> Bool
 
-True if a Kaimon-managed Qdrant is running — either a child we hold a handle to,
-or one recorded in the PID file by any session (surviving reloads/restarts). A
-stale PID file (process gone) is cleaned up and reports `false`.
+True if a Kaimon-managed Qdrant is running on this machine — a child we hold a handle to, or one
+in the record from any session (surviving reloads/restarts). A record for this machine whose
+process is gone is removed and reports `false`.
 """
 function managed_qdrant_running()::Bool
     _qdrant_child_alive() && return true
-    pid = _read_qdrant_pid()
-    pid === nothing && return false
-    _pid_alive(pid) && return true
-    try; rm(_qdrant_pid_file(); force = true); catch; end
+    r = read_service_record(qdrant_record_path())
+    (r === nothing || r.host != gethostname()) && return false
+    _pid_alive(r.pid) && return true
+    try; rm(qdrant_record_path(); force = true); catch; end
     return false
 end
 
@@ -274,17 +293,21 @@ Make a Qdrant endpoint available, returning `true` if one is reachable by the
 time we return.
 
 Fast path: if `QdrantClient.ping()` already succeeds, return immediately — this
-covers Docker, a remote instance, or a child we launched earlier.
+covers Docker, a remote instance, or a child we launched earlier. A Qdrant the user
+configured (`qdrant.url`) is only connected to, never started.
 
 Otherwise, if managed mode is on and the binary is installed, load it (if needed),
-spawn a child bound to the configured port, and poll until ready: `timeout` seconds
+spawn a child on loopback (the configured port, else a per-account fallback) with a
+new API key, record it, and poll until ready: `timeout` seconds
 without startup progress in its log, or `max_wait` in total (see
 [`_await_qdrant_healthy`](@ref)). Idempotent and thread-safe: concurrent callers are serialized and only
 one child is ever spawned. Returns `false` (without spawning) when mode is `:off`
 or the binary isn't installed.
 """
 function ensure_qdrant!(; timeout::Real = 30.0, max_wait::Real = 600.0)::Bool
+    QdrantClient.refresh!()
     QdrantClient.ping() && return true
+    isempty(qdrant_url_setting()) || return false   # the user's own Qdrant: nothing to start
 
     mode = qdrant_managed_mode()
     mode === :off && return false
@@ -299,16 +322,40 @@ function ensure_qdrant!(; timeout::Real = 30.0, max_wait::Real = 600.0)::Bool
     end
 
     lock(_QDRANT_LOCK) do
+        QdrantClient.refresh!()
         QdrantClient.ping() && return true  # another caller may have won the race
 
         if !_qdrant_child_alive()
-            port = _qdrant_http_port()
+            rec = qdrant_record_path()
+            r = read_service_record(rec)
+            # Qdrant's storage is served by one process; two machines sharing a home directory
+            # must not both open it.
+            if r !== nothing && r.host != gethostname() && record_fresh(r)
+                @warn "Kaimon on $(r.host) is serving the Qdrant index in $(qdrant_storage_root()). \
+                       One machine at a time can serve an index: use that machine, or give this \
+                       one its own qdrant.storage_dir."
+                return false
+            end
+            fixed = qdrant_fixed_port()
+            port = service_free_port(qdrant_port_setting(); fixed)
+            grpc = port === nothing ? nothing : service_free_port(port + 1; exclude = [port], fixed)
+            if port === nothing || grpc === nothing
+                @error fixed ?
+                    "Managed Qdrant is fixed to ports $(qdrant_port_setting()) and $(qdrant_port_setting() + 1), and one is in use" :
+                    "No free port for managed Qdrant near $(qdrant_port_setting())"
+                return false
+            end
+            key = new_service_key()
             log = qdrant_log_path()
             @info "Starting managed Qdrant" port storage = qdrant_storage_dir() log
             try
-                _QDRANT_PROC[] = _spawn_managed_qdrant(;
-                    storage_path = qdrant_storage_dir(), http_port = port, log_path = log)
-                _write_qdrant_pid(getpid(_QDRANT_PROC[]))
+                proc = _spawn_managed_qdrant(; storage_path = qdrant_storage_dir(),
+                    http_port = port, grpc_port = grpc, api_key = key, log_path = log)
+                _QDRANT_PROC[] = proc
+                write_service_record(rec, ServiceRecord(port, key; pid = getpid(proc)))
+                _QDRANT_HEARTBEAT[] === nothing || close(_QDRANT_HEARTBEAT[])
+                _QDRANT_HEARTBEAT[] = start_service_heartbeat!(rec, _qdrant_child_alive)
+                QdrantClient.configure!("http://127.0.0.1:$port", key)
             catch e
                 @error "Failed to launch managed Qdrant" exception = (e, catch_backtrace())
                 return false
@@ -390,21 +437,24 @@ function shutdown_qdrant!()
                 @warn "Error stopping managed Qdrant" exception = e
             end
         end
-        # Only clear the PID file if it points at OUR child — or, when the handle died
-        # before we could read its pid, at a process that is no longer alive.
-        stale = _read_qdrant_pid()
-        if stale !== nothing && (stale == pid || (pid === nothing && !_pid_alive(stale)))
-            try; rm(_qdrant_pid_file(); force = true); catch; end
+        # Only remove the record if it describes OUR child — or, when the handle died before we
+        # could read its pid, a process on this machine that is no longer alive.
+        r = read_service_record(qdrant_record_path())
+        if r !== nothing && r.host == gethostname() &&
+           (r.pid == pid || (pid === nothing && !_pid_alive(r.pid)))
+            try; rm(qdrant_record_path(); force = true); catch; end
         end
+        _QDRANT_HEARTBEAT[] === nothing || (close(_QDRANT_HEARTBEAT[]); _QDRANT_HEARTBEAT[] = nothing)
         _QDRANT_PROC[] = nothing
+        QdrantClient.refresh!()
     end
 end
 
 """
     stop_managed_qdrant!()
 
-Stop whichever managed Qdrant is running (via the PID file), even one started by a
-prior session whose in-memory handle we no longer hold. This is the explicit
+Stop whichever managed Qdrant is running on this machine (via its record), even one started
+by a prior session whose in-memory handle we no longer hold. This is the explicit
 user-driven stop (the Search-tab `[l] stop` / `disable`); unlike `shutdown_qdrant!`
 it is NOT what `atexit` uses, so it only fires when the user asks.
 """
@@ -412,7 +462,9 @@ function stop_managed_qdrant!()
     lock(_QDRANT_LOCK) do
         proc = _QDRANT_PROC[]
         pid = (proc isa Base.Process ? _proc_pid(proc) : nothing)
-        pid = something(pid, _read_qdrant_pid(), Some(nothing))
+        r = read_service_record(qdrant_record_path())
+        here = r !== nothing && r.host == gethostname()
+        pid = something(pid, here ? r.pid : nothing, Some(nothing))
         if pid !== nothing && _pid_alive(pid)
             @info "Stopping managed Qdrant" pid
             _kill_pid(pid; force = false)
@@ -422,8 +474,10 @@ function stop_managed_qdrant!()
             end
             _pid_alive(pid) && _kill_pid(pid; force = true)
         end
+        _QDRANT_HEARTBEAT[] === nothing || (close(_QDRANT_HEARTBEAT[]); _QDRANT_HEARTBEAT[] = nothing)
         _QDRANT_PROC[] = nothing
-        try; rm(_qdrant_pid_file(); force = true); catch; end
+        here && (try; rm(qdrant_record_path(); force = true); catch; end)
+        QdrantClient.refresh!()
     end
 end
 
@@ -467,9 +521,16 @@ function uninstall_managed_qdrant!()::Bool
     end
 end
 
-"""Delete the managed Qdrant on-disk storage (the local vector index; re-indexable)."""
+"""
+Delete the managed Qdrant on-disk storage (the local vector index; re-indexable). Only what Kaimon
+put under the storage root is removed: the root may be a directory the user chose.
+"""
 function delete_qdrant_storage!()
-    dir = joinpath(kaimon_cache_dir(), "qdrant")
-    isdir(dir) && rm(dir; recursive = true, force = true)
-    return dir
+    root = qdrant_storage_root()
+    for d in ("storage", "snapshots")
+        p = joinpath(root, d)
+        isdir(p) && rm(p; recursive = true, force = true)
+    end
+    rm(qdrant_record_path(); force = true)
+    return root
 end

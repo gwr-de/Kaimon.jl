@@ -487,16 +487,7 @@ function vscode_extensions_dir()
     end
 end
 
-function _vscode_user_settings_path()
-    home = homedir()
-    if Sys.isapple()
-        joinpath(home, "Library", "Application Support", "Code", "User", "settings.json")
-    elseif Sys.iswindows()
-        joinpath(get(ENV, "APPDATA", home), "Code", "User", "settings.json")
-    else
-        joinpath(home, ".config", "Code", "User", "settings.json")
-    end
-end
+_vscode_user_settings_path() = joinpath(vscode_user_dir(), "settings.json")
 
 """
     read_vscode_settings() -> Dict

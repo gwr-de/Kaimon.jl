@@ -21,7 +21,7 @@ const DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 """
     get_ollama_embedding(text::String; model::String=DEFAULT_EMBEDDING_MODEL) -> Vector{Float64}
 
-Get embedding for text using Ollama `/api/embed` endpoint.
+Get embedding for text using Ollama's `/api/embed` endpoint at `ollama_url()`.
 """
 function get_ollama_embedding(
     text::String;
@@ -37,7 +37,7 @@ function get_ollama_embedding(
     for attempt in 0:retries
         try
             response = HTTP.post(
-                "http://localhost:11434/api/embed",
+                "$(ollama_url())/api/embed",
                 ["Content-Type" => "application/json"],
                 body;
                 status_exception = false,
@@ -65,27 +65,54 @@ function get_ollama_embedding(
     return Float64[]
 end
 
+"""
+    get_embedding(text::String; model::String=DEFAULT_EMBEDDING_MODEL) -> Vector{Float64}
+
+Embed `text` with the configured backend (`embedding_backend()`): Ollama, or Kaimon's managed
+llama.cpp server running the same model file. Empty on failure.
+"""
+get_embedding(text::String; model::String = DEFAULT_EMBEDDING_MODEL, retries::Int = 2) =
+    embedding_backend() === :llamacpp ? llamacpp_embedding(text, model) :
+                                        get_ollama_embedding(text; model, retries)
+
 # ============================================================================
 # Health Checks & Service Guards
 # ============================================================================
+
+"Ollama's installed models (`GET /api/tags`), or `nothing` when it can't be reached."
+function _ollama_tags()
+    try
+        response = HTTP.get(
+            "$(ollama_url())/api/tags";
+            connect_timeout = 2,
+            request_timeout = 3,
+        )
+        response.status == 200 || return nothing
+        return String[get(m, "name", "") for m in get(JSON.parse(String(response.body)), "models", [])]
+    catch
+        return nothing
+    end
+end
 
 """
     ping_ollama() -> Bool
 
 Check if Ollama is reachable via GET /api/tags with a 2-second timeout.
 """
-function ping_ollama()
-    try
-        response = HTTP.get(
-            "http://localhost:11434/api/tags";
-            connect_timeout = 2,
-            request_timeout = 3,
-        )
-        return response.status == 200
-    catch
-        return false
-    end
-end
+ping_ollama() = _ollama_tags() !== nothing
+
+"""
+    ping_embedder() -> Bool
+
+Whether the configured embedding backend can serve: Ollama answering, or the llama.cpp backend
+installed (its server starts on first use).
+"""
+ping_embedder() = embedding_backend() === :llamacpp ? llamacpp_installed() : ping_ollama()
+
+# Ollama names a model without a tag `name:latest`; otherwise the tag must match, since
+# `name:0.6b` and `name:8b` are different models.
+_with_tag(m::AbstractString) = occursin(':', m) ? String(m) : String(m) * ":latest"
+_model_matches(installed::AbstractString, model::AbstractString) = _with_tag(installed) == _with_tag(model)
 
 """
     check_ollama_model(model::String) -> Bool
@@ -93,26 +120,18 @@ end
 Check if a specific model is available in Ollama.
 """
 function check_ollama_model(model::String)
-    try
-        response = HTTP.get(
-            "http://localhost:11434/api/tags";
-            connect_timeout = 2,
-            request_timeout = 3,
-        )
-        data = JSON.parse(String(response.body))
-        models = get(data, "models", [])
-        for m in models
-            name = get(m, "name", "")
-            # Match "snowflake-arctic-embed:latest" or just "snowflake-arctic-embed"
-            if name == model || startswith(name, split(model, ":")[1])
-                return true
-            end
-        end
-        return false
-    catch
-        return false
-    end
+    tags = _ollama_tags()
+    return tags !== nothing && any(t -> _model_matches(t, model), tags)
 end
+
+"""
+    embedding_model_available(model) -> Bool
+
+Whether the configured backend has `model`: installed in Ollama, or a model file the llama.cpp
+backend can run (in an Ollama store or downloaded).
+"""
+embedding_model_available(model::String) =
+    embedding_backend() === :llamacpp ? embedding_model_file(model) !== nothing : check_ollama_model(model)
 
 """
     list_ollama_models() -> Vector{String}
@@ -121,33 +140,38 @@ Return names of all models installed in Ollama.
 Calls `GET /api/tags` and extracts the `name` field from each entry.
 Returns an empty vector on error or if Ollama is unreachable.
 """
-function list_ollama_models()
+list_ollama_models() = something(_ollama_tags(), String[])
+
+"Ask Ollama to delete `model`. True when it did."
+function remove_ollama_model(model::AbstractString)::Bool
     try
-        response = HTTP.get(
-            "http://localhost:11434/api/tags";
-            connect_timeout = 2,
-            request_timeout = 3,
-        )
-        data = JSON.parse(String(response.body))
-        models = get(data, "models", [])
-        return String[get(m, "name", "") for m in models]
+        r = HTTP.request("DELETE", "$(ollama_url())/api/delete", ["Content-Type" => "application/json"],
+                         JSON.json(Dict("model" => model, "name" => model));
+                         status_exception = false, retry = false, connect_timeout = 2, request_timeout = 30)
+        return r.status == 200
     catch
-        return String[]
+        return false
     end
 end
+
+"Models the configured embedding backend has locally."
+list_embedding_models() = embedding_backend() === :llamacpp ? llamacpp_local_models() : list_ollama_models()
+
+"The embedding backend's name, for messages."
+embedder_name() = embedding_backend() === :llamacpp ? "llama.cpp" : "Ollama"
 
 """
     check_search_health(; model=DEFAULT_EMBEDDING_MODEL)
 
-Returns a NamedTuple (qdrant_up, ollama_up, model_available, collection_count,
+Returns a NamedTuple (qdrant_up, embedder_up, model_available, collection_count,
 fts_chunks, fts_collections) — the last two report local lexical-index coverage.
 """
 function check_search_health(; model::String = DEFAULT_EMBEDDING_MODEL)
     qdrant_up = QdrantClient.ping()
-    ollama_up = ping_ollama()
-    model_available = ollama_up ? check_ollama_model(model) : false
+    embedder_up = ping_embedder()
+    model_available = embedder_up ? embedding_model_available(model) : false
     collection_count = qdrant_up ? length(QdrantClient.list_collections()) : 0
-    # Lexical (FTS5) coverage — local, so available even when Qdrant/Ollama are down.
+    # Lexical (FTS5) coverage — local, so available even when Qdrant/the embedder are down.
     fts_chunks, fts_collections = try
         cov = FtsIndex.coverage()
         (cov.total, length(cov.collections))
@@ -157,7 +181,9 @@ function check_search_health(; model::String = DEFAULT_EMBEDDING_MODEL)
     K = parentmodule(@__MODULE__)
     return (
         qdrant_up = qdrant_up,
-        ollama_up = ollama_up,
+        embedder_up = embedder_up,
+        embedding_backend = embedding_backend(),
+        embedding_where = embedding_backend() === :llamacpp ? embedding_model_dir() : ollama_url(),
         model_available = model_available,
         collection_count = collection_count,
         fts_chunks = fts_chunks,
@@ -169,14 +195,14 @@ function check_search_health(; model::String = DEFAULT_EMBEDDING_MODEL)
 end
 
 """
-    _require_services(; need_qdrant=true, need_ollama=false, model=DEFAULT_EMBEDDING_MODEL) -> Union{String,Nothing}
+    _require_services(; need_qdrant=true, need_embedder=false, model=DEFAULT_EMBEDDING_MODEL) -> Union{String,Nothing}
 
 Pre-flight check before tool execution. Returns a friendly error string if
 any required service is unavailable, or `nothing` if all checks pass.
 """
 function _require_services(;
     need_qdrant::Bool = true,
-    need_ollama::Bool = false,
+    need_embedder::Bool = false,
     model::String = DEFAULT_EMBEDDING_MODEL,
 )
     if need_qdrant && !QdrantClient.ping()
@@ -189,12 +215,17 @@ function _require_services(;
                     Kaimon run it for you)"
         end
     end
-    if need_ollama
-        if !ping_ollama()
-            return "Ollama is not reachable at http://localhost:11434. Is it running? (e.g., `ollama serve`)"
-        end
-        if !check_ollama_model(model)
-            return "Ollama model '$model' is not available. Pull it with: `ollama pull $model`"
+    if need_embedder
+        if embedding_backend() === :llamacpp
+            llamacpp_installed() ||
+                return "The llama.cpp embedding backend is not installed. Install it from the Search tab's config ([o], then [b])."
+            embedding_model_file(model) === nothing &&
+                return "No model file for '$model'. Pull it from the Search tab ([p]) or place it in $(embedding_model_dir())."
+        else
+            ping_ollama() ||
+                return "Ollama is not reachable at $(ollama_url()). Is it running? (e.g., `ollama serve`)"
+            check_ollama_model(model) ||
+                return "Ollama model '$model' is not available. Pull it with: `ollama pull $model`"
         end
     end
     return nothing
@@ -632,7 +663,8 @@ qdrant_index_project_tool = @mcp_tool(
         "required" => [],
     ),
     function (args)
-        err = _require_services(need_ollama = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         project_path = get(args, "project_path", pwd())
@@ -696,7 +728,8 @@ qdrant_sync_index_tool = @mcp_tool(
         "required" => [],
     ),
     function (args)
-        err = _require_services(need_ollama = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         project_path = get(args, "project_path", pwd())
@@ -745,7 +778,8 @@ qdrant_reindex_file_tool = @mcp_tool(
         "required" => ["file_path", "collection"],
     ),
     function (args)
-        err = _require_services(need_ollama = true)
+        # Indexing embeds with the configured model, so that is the one that must be available.
+        err = _require_services(need_embedder = true, model = configured_embedding_model())
         err !== nothing && return err
 
         file_path = get(args, "file_path", "")
@@ -1024,13 +1058,13 @@ ollama_embed_tool = @mcp_tool(
         # embedding through this tool has to land in the same vector space as the
         # collections the indexer builds, or its vectors are silently unusable.
         model = get(args, "model", configured_embedding_model())
-        err = _require_services(need_ollama = true, model = model)
+        err = _require_services(need_embedder = true, model = model)
         err !== nothing && return err
 
         text = get(args, "text", "")
         isempty(text) && return "Error: text is required"
 
-        return get_ollama_embedding(text; model = model)
+        return get_embedding(text; model = model)
     end
 )
 

@@ -613,16 +613,9 @@ function _refresh_client_status_async!(m::KaimonModel)
     end
 
     # VS Code
-    vscode_user_dir = if Sys.isapple()
-        joinpath(homedir(), "Library", "Application Support", "Code", "User")
-    elseif Sys.iswindows()
-        joinpath(get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")), "Code", "User")
-    else
-        joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "Code", "User")
-    end
     spawn_task!(q, :client_status) do
         "VS Code" => _detect_in_files(
-            joinpath(vscode_user_dir, "mcp.json"),
+            joinpath(vscode_user_dir(), "mcp.json"),
             joinpath(pwd(), ".vscode", "mcp.json"),
         )
     end
@@ -642,7 +635,7 @@ function _refresh_client_status_async!(m::KaimonModel)
     # OpenCode
     spawn_task!(q, :client_status) do
         "OpenCode" => _detect_in_files(
-            joinpath(homedir(), ".config", "opencode", "opencode.json"),
+            joinpath(opencode_config_dir(), "opencode.json"),
         )
     end
 
@@ -787,26 +780,7 @@ function _complete_relative_dir!(input::TextInput, project_root::String)
 end
 
 """KiloCode settings directory inside VS Code's globalStorage."""
-function _kilo_settings_dir()
-    gs = if Sys.isapple()
-        joinpath(homedir(), "Library", "Application Support", "Code", "User", "globalStorage")
-    elseif Sys.iswindows()
-        joinpath(
-            get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")),
-            "Code",
-            "User",
-            "globalStorage",
-        )
-    else
-        joinpath(
-            get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")),
-            "Code",
-            "User",
-            "globalStorage",
-        )
-    end
-    joinpath(gs, "kilocode.kilo-code", "settings")
-end
+_kilo_settings_dir() = joinpath(vscode_user_dir(), "globalStorage", "kilocode.kilo-code", "settings")
 
 function _short_path(path::AbstractString)
     home = homedir()

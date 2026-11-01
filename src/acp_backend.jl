@@ -1440,8 +1440,7 @@ end
 The user's own opencode config, read before `XDG_CONFIG_HOME` is redirected away from it.
 """
 function _opencode_user_config()
-    base = get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config"))
-    path = joinpath(base, "opencode", "opencode.json")
+    path = joinpath(opencode_config_dir(), "opencode.json")
     isfile(path) || return Dict{String,Any}()
     try
         cfg = JSON.parse(read(path, String))

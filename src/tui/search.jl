@@ -53,12 +53,13 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
 
     # ── Row 1: Service health (condensed when both up) ──
     qdrant_up = m.search_qdrant_up
-    ollama_ok = m.search_ollama_up && m.search_model_available
+    ollama_ok = m.search_embedder_up && m.search_model_available
+    embedder = m.search_embedding_backend === :llamacpp ? "llama.cpp" : "Ollama"
     if qdrant_up && ollama_ok
         _write_spans!(buf, x, y, [
             ("● ", tstyle(:success)), ("Qdrant", txt),
             (sep, dim),
-            ("● ", tstyle(:success)), ("Ollama", txt),
+            ("● ", tstyle(:success)), (embedder, txt),
             (" ", dim), (m.search_embedding_model, tstyle(:accent)),
         ])
         y += 1
@@ -71,31 +72,37 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
             hint = m.search_managed_qdrant_installed ? " start managed Qdrant" :
                                                        " enable managed Qdrant"
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Qdrant  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Qdrant", 10), txt),
                 ("[l]", tstyle(:warning)), (hint, dim),
             ])
         else
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Qdrant  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Qdrant", 10), txt),
                 ("docker run -d -p 6333:6333 qdrant/qdrant", dim),
             ])
         end
         y += 1
         if ollama_ok
             _write_spans!(buf, x, y, [
-                ("● ", tstyle(:success)), ("Ollama  ", txt),
+                ("● ", tstyle(:success)), (rpad(embedder, 10), txt),
                 (m.search_embedding_model, tstyle(:accent)),
             ])
-        elseif m.search_ollama_up
+        elseif m.search_embedder_up
             _write_spans!(buf, x, y, [
-                ("◐ ", tstyle(:warning)), ("Ollama  ", txt),
+                ("◐ ", tstyle(:warning)), (rpad(embedder, 10), txt),
                 ("model missing  ", txt),
                 ("[p]", tstyle(:warning)),
                 (" pull $(m.search_embedding_model)", dim),
             ])
+        elseif m.search_embedding_backend === :llamacpp
+            _write_spans!(buf, x, y, [
+                ("○ ", tstyle(:error)), (rpad(embedder, 10), txt),
+                ("not installed  ", txt), ("[o]", tstyle(:warning)), (" options, then ", dim),
+                ("[b]", tstyle(:warning)), (" install", dim),
+            ])
         else
             _write_spans!(buf, x, y, [
-                ("○ ", tstyle(:error)), ("Ollama  ", txt),
+                ("○ ", tstyle(:error)), (rpad("Ollama", 10), txt),
                 ("https://ollama.com/download", dim),
             ])
         end
@@ -149,6 +156,11 @@ function _view_search_status(m::KaimonModel, area::Rect, buf::Buffer)
             ("[o]", tstyle(:accent)),
             (" to reindex", dim),
         ])
+        y += 1
+    end
+    _pull = _model_pull_text()
+    if !isempty(_pull)
+        _write_spans!(buf, x, y, [("⟳ ", tstyle(:accent)), (_pull, tstyle(:accent))])
         y += 1
     end
     _status = _get_search_status()
@@ -520,6 +532,20 @@ function _handle_collection_picker_key!(m::KaimonModel, evt::KeyEvent)
             end
         end
     end
+end
+
+# ── A model pull or download in flight ──
+# Shown until it ends, unlike the status line, which clears after a few seconds. The pulling task
+# updates it; rendering only reads it.
+const _MODEL_PULL = Ref{Any}(nothing)   # (model, started, done, total) or nothing
+_set_model_pull!(p) = (_MODEL_PULL[] = p; nothing)
+function _model_pull_text()
+    p = _MODEL_PULL[]
+    p === nothing && return ""
+    el = round(Int, time() - p.started)
+    mb(b) = round(Int, b / 1024^2)
+    amount = p.total > 0 ? "  $(mb(p.done)) / $(mb(p.total)) MB" : ""
+    return "Pulling $(p.model)$amount  ($(el ÷ 60):$(lpad(el % 60, 2, '0')))"
 end
 
 # ── Search status feedback (module-level Ref, Revise-safe) ──

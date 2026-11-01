@@ -349,7 +349,9 @@ const TAB_ADVANCED   = 10
     search_layout::ResizableLayout =
         ResizableLayout(Vertical, [Fixed(6), Fixed(3), Fill()])
     search_qdrant_up::Bool = false
-    search_ollama_up::Bool = false
+    search_embedder_up::Bool = false
+    search_embedding_backend::Symbol = :ollama   # from the health check (render stays syscall-free)
+    search_embedding_where::String = ""         # the backend's address or model directory, for display
     search_model_available::Bool = false
     # Managed-Qdrant display state, refreshed by the health check so the render
     # loop doesn't do per-frame syscalls (and demos/tests can set it directly).
@@ -378,6 +380,7 @@ const TAB_ADVANCED   = 10
     } = @NamedTuple{name::String, dims::Int, ctx::Int, installed::Bool}[]
     search_config_custom_input::Any = nothing            # TextInput for custom model name
     search_config_custom_editing::Bool = false          # true when editing custom model field
+    search_config_remove_confirm::String = ""           # model awaiting a second [x] to remove
     search_config_col_info::Dict = Dict()              # cached collection_info result
     search_dimension_mismatch::Bool = false             # auto-detected dimension mismatch
     search_delete_confirm::Bool = false                 # delete confirmation state

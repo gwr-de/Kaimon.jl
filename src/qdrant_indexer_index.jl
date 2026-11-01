@@ -90,8 +90,17 @@ function _write_fts!(file_path::String, collection::String, prepared::Vector{Tup
     return length(fts_rows)
 end
 
-"""Embed a file's prepared chunks and upsert them to Qdrant (project + global) under
-their shared deterministic IDs. Returns the number of vectors written."""
+"""
+The prepared chunks that need a vector: those whose point is missing, or was embedded by another
+model. `have` maps the point IDs already stored to the model each was embedded with. A point's ID
+covers its collection, file, span and text, so a stored point with this model is the same vector.
+"""
+_needs_embedding(prepared::Vector{Tuple{Dict,String}}, have::AbstractDict, model::AbstractString) =
+    Tuple{Dict,String}[(c, pid) for (c, pid) in prepared if get(have, pid, nothing) != model]
+
+"""Embed a file's prepared chunks and upsert them to Qdrant under their shared deterministic IDs,
+skipping the ones already stored with this model, so an interrupted index resumes where it stopped.
+Returns the number of vectors written."""
 function _embed_upsert!(
     file_path::String,
     collection::String,
@@ -101,17 +110,18 @@ function _embed_upsert!(
 )
     isempty(prepared) && return 0
     max_length = get_embedding_config(embedding_model).context_chars
+    have = QdrantClient.point_payload_field(collection, [pid for (_, pid) in prepared], "embedding_model")
     points = Dict[]
     n = 0
-    for (chunk, point_id) in prepared
+    for (chunk, point_id) in _needs_embedding(prepared, have, embedding_model)
         text = chunk["text"]
 
         # Chunks are already size-fit by split_to_fit; embed directly. A rare embed
         # failure retries on the truncated text under the SAME id (keeps FTS↔Qdrant 1:1);
         # if that also fails the chunk stays lexical-only.
-        embedding = get_ollama_embedding(text; model=embedding_model)
+        embedding = get_embedding(text; model=embedding_model)
         if isempty(embedding)
-            embedding = get_ollama_embedding(first(text, max_length); model=embedding_model)
+            embedding = get_embedding(first(text, max_length); model=embedding_model)
             if isempty(embedding)
                 with_index_logger(() -> @warn "Failed to embed chunk; lexical-only" file = basename(file_path) start_line = chunk["start_line"])
                 continue
@@ -128,6 +138,7 @@ function _embed_upsert!(
             "project_path" => project_path,
             "collection" => collection,
             "indexed_at" => round(Int, time()),
+            "embedding_model" => embedding_model,
             "kaimon_schema" => 1,  # schema version for future migrations
         )
         for key in ["signature", "parameters", "type_params", "parent_type", "is_mutable", "is_exported"]
@@ -141,13 +152,11 @@ function _embed_upsert!(
 
         if length(points) >= 10
             QdrantClient.upsert_points(collection, points)
-            _upsert_to_global!(points)
             points = Dict[]
         end
     end
     if !isempty(points)
         QdrantClient.upsert_points(collection, points)
-        _upsert_to_global!(points)
     end
     return n
 end
@@ -174,8 +183,6 @@ function _index_files_two_pass(
 )
     isempty(files) && return 0
     max_length = get_embedding_config(embedding_model).context_chars
-    gc = global_collection_name()
-    gc_exists = reindex ? (try; QdrantClient.collection_exists(gc); catch; false; end) : false
     n = length(files)
     # Report per-file progress to a watcher (e.g. a background job). `phase` is 1 (lexical)
     # or 2 (embeddings); called once per file even when it yields no chunks so the count
@@ -192,7 +199,6 @@ function _index_files_two_pass(
                 # Changed content gets new deterministic IDs; clear the old chunks so
                 # stale vectors don't linger.
                 try; QdrantClient.delete_by_file(collection, f); catch; end
-                gc_exists && (try; QdrantClient.delete_by_file(gc, f); catch; end)
             end
             isempty(prepared) || _write_fts!(f, collection, prepared)
         catch e
@@ -282,12 +288,10 @@ function reindex_file(
     !silent && verbose && println("  Re-indexing: $(basename(file_path))")
     with_index_logger(() -> @info "Re-indexing file" file = basename(file_path))
 
-    # Delete old chunks for this file from both project and global collections
+    # Delete old chunks for this file
     QdrantClient.delete_by_file(collection, file_path)
-    gc = global_collection_name()
-    try; QdrantClient.collection_exists(gc) && QdrantClient.delete_by_file(gc, file_path); catch; end
 
-    # Index fresh (dual-writes to both collections)
+    # Index fresh
     return index_file(file_path, collection; project_path=project_path, verbose=verbose, silent=silent, embedding_model=embedding_model)
 end
 
@@ -375,13 +379,10 @@ function prune_orphans!(
 
     isempty(orphans) && return (pruned=0, live=live, files=String[])
 
-    gc = global_collection_name()
-    gc_exists = try; QdrantClient.collection_exists(gc); catch; false; end
     for file_path in orphans
         !silent && verbose && println("  Removing orphan: $(basename(file_path))")
         with_index_logger(() -> @info "Removing orphaned index entry" collection = col file = basename(file_path))
         try; QdrantClient.delete_by_file(col, file_path); catch; end
-        gc_exists && try; QdrantClient.delete_by_file(gc, file_path); catch; end
         try; FtsIndex.delete_file!(col, file_path); catch; end
         project_path !== nothing && try; remove_indexed_file(project_path, file_path); catch; end
     end
@@ -552,15 +553,6 @@ function index_project(
         with_index_logger(() -> @info "Recreating collection" collection = col_name model = embedding_model vector_size = vector_size)
         QdrantClient.delete_collection(col_name)
         QdrantClient.create_collection(col_name; vector_size=vector_size)
-        # Also purge this project's entries from the global collection
-        gc = global_collection_name()
-        try
-            if QdrantClient.collection_exists(gc)
-                QdrantClient.delete_by_filter(gc, Dict(
-                    "must" => [Dict("key" => "collection", "match" => Dict("value" => col_name))]
-                ))
-            end
-        catch; end
         # Purge the lexical index for this collection in lockstep.
         try; FtsIndex.clear_collection!(col_name); catch; end
     elseif !col_exists
@@ -729,14 +721,11 @@ function _sync_index_impl(
     deleted = 0
     total_chunks = 0
 
-    # Handle deleted files (remove from both project and global collections + FTS)
-    gc = global_collection_name()
-    gc_exists = try; QdrantClient.collection_exists(gc); catch; false; end
+    # Handle deleted files (remove from the project collection + FTS)
     for file_path in deleted_files
         !silent && verbose && println("  Removing deleted: $(basename(file_path))")
         with_index_logger(() -> @info "Removing deleted file" file = basename(file_path))
         try; QdrantClient.delete_by_file(col_name, file_path); catch; end
-        gc_exists && try; QdrantClient.delete_by_file(gc, file_path); catch; end
         try; FtsIndex.delete_file!(col_name, file_path); catch; end
         remove_indexed_file(project_path, file_path)
         deleted += 1
@@ -864,6 +853,7 @@ ever lost it self-heals on the next boot. Runs in the background at startup.
 """
 function ensure_fts_coverage!()
     QdrantClient.ping() || return Pair{String,Int}[]
+    drop_legacy_global_collection!()
     gc = global_collection_name()
     cov = try; FtsIndex.coverage(); catch; (collections = NamedTuple[], total = 0); end
     fts_counts = Dict(c.collection => c.n for c in cov.collections)
