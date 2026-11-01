@@ -175,6 +175,7 @@ end
             @test entry["url"] == "http://localhost:2829/mcp"
             @test !haskey(entry, "command")
             @test entry["tools"]["ex"]["approval_mode"] == "approve"   # tool policy retained
+            @test !occursin(r"\n[ \t]+\S", text)          # flush left, like the hand-written file
 
             Kaimon._remove_codex(m)
             @test read(path, String) == before * after

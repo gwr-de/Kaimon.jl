@@ -917,7 +917,8 @@ function _codex_splice_server(text::AbstractString, name::AbstractString, entry)
     block = String[]
     if entry !== nothing
         t = sprint(io -> TOML.print(io, Dict("mcp_servers" => Dict(String(name) => entry)); sorted = true))
-        block = [String(l) for l in split(strip(t, '\n'), '\n') if strip(l) != "[mcp_servers]"]
+        # TOML.print indents sub-tables; written flush left like a hand-edited config.
+        block = [String(lstrip(l)) for l in split(strip(t, '\n'), '\n') if strip(l) != "[mcp_servers]"]
         while !isempty(block) && isempty(strip(first(block)))
             popfirst!(block)
         end
@@ -950,6 +951,8 @@ server is written inline.
 """
 function _write_codex_config(path::String, config::AbstractDict; server = nothing)
     content = lstrip(sprint(io -> TOML.print(io, config; sorted = true)), '\n')
+    flat = join(lstrip.(split(content, '\n')), '\n')   # TOML.print indents sub-tables
+    TOML.tryparse(flat) == TOML.parse(content) && (content = flat)
     if server !== nothing && isfile(path)
         entry = get(get(config, "mcp_servers", Dict{String,Any}()), server, nothing)
         spliced = _codex_splice_server(read(path, String), server, entry)
