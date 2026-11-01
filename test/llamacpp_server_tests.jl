@@ -45,10 +45,13 @@ end
     end
 
     @testset "server: loopback, the launch's key, pooling from the model file" begin
-        args = KL.llamacpp_server_args("/m.gguf", 23456, "k789"; threads = 4)
+        args = KL.llamacpp_server_args("/m.gguf", 23456; threads = 4)
         @test args[findfirst(==("--host"), args) + 1] == "127.0.0.1"
         @test args[findfirst(==("--port"), args) + 1] == "23456"
-        @test args[findfirst(==("--api-key"), args) + 1] == "k789"
+        # The key is passed in the environment, never on the command line.
+        cmd = KL.llamacpp_server_command("/bin/llama-server", "/m.gguf", 23456, "k789")
+        @test !any(a -> occursin("k789", a), cmd.exec)
+        @test "LLAMA_API_KEY=k789" in cmd.env
         @test "--embeddings" in args
         @test !("--pooling" in args)
         @test args[findfirst(==("-ub"), args) + 1] == string(KL.LLAMACPP_BATCH)

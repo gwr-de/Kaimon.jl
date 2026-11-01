@@ -255,10 +255,17 @@ end
 const LLAMACPP_BATCH = 4096
 
 "The arguments `llama-server` is started with. Pooling comes from the model file, as in Ollama."
-llamacpp_server_args(file::AbstractString, port::Integer, key::AbstractString; threads::Integer = llamacpp_threads()) =
+llamacpp_server_args(file::AbstractString, port::Integer; threads::Integer = llamacpp_threads()) =
     ["-m", String(file), "--embeddings", "--host", "127.0.0.1", "--port", string(port),
-     "--api-key", String(key), "-c", string(LLAMACPP_BATCH), "-b", string(LLAMACPP_BATCH),
+     "-c", string(LLAMACPP_BATCH), "-b", string(LLAMACPP_BATCH),
      "-ub", string(LLAMACPP_BATCH), "-t", string(threads), "-ngl", "99"]
+
+"""
+The command that starts `llama-server`. The key goes in the environment, which only this account
+can read; command-line arguments are visible to every user of the machine.
+"""
+llamacpp_server_command(exe, file::AbstractString, port::Integer, key::AbstractString) =
+    addenv(`$exe $(llamacpp_server_args(file, port))`, "LLAMA_API_KEY" => String(key))
 
 """
     ensure_llamacpp!(model; timeout=120) -> Union{Tuple{String,String},Nothing}
@@ -296,7 +303,7 @@ function ensure_llamacpp!(model::AbstractString; timeout::Real = 120.0)
         end
         key = new_service_key()
         log = llamacpp_log_path(model)
-        cmd = `$exe $(llamacpp_server_args(file, port, key))`
+        cmd = llamacpp_server_command(exe, file, port, key)
         @info "Starting llama.cpp embedding server" model port log
         logio = open_service_log(log)
         println(logio, "\n── $(Dates.now()) llama-server for $model on 127.0.0.1:$port ──")
