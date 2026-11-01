@@ -156,17 +156,19 @@ function extract_definition!(
         while prev_line >= 1 && isempty(strip(lines[prev_line]))
             prev_line -= 1
         end
-        if prev_line >= 1 && endswith(strip(lines[prev_line]), "\"\"\"")
-            # Find start of docstring
+        prev = prev_line >= 1 ? strip(lines[prev_line]) : ""
+        if endswith(prev, "\"\"\"")
+            # Find start of docstring. A one-line docstring opens on its own closing line.
             doc_end = prev_line
             doc_start = prev_line
-            while doc_start > 1
+            one_line = length(prev) >= 6 && startswith(prev, "\"\"\"")
+            while !one_line && doc_start > 1
                 doc_start -= 1
                 if startswith(strip(lines[doc_start]), "\"\"\"")
                     break
                 end
             end
-            if doc_start < doc_end
+            if one_line || doc_start < doc_end
                 docstring = join(lines[doc_start:doc_end], "\n")
                 text = docstring * "\n" * text
                 start_line = doc_start
