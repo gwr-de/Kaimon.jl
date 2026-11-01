@@ -254,6 +254,9 @@ end
 
 const _CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp"
 
+# Codex reports an unset list as `null`.
+_codex_str_list(x) = x isa AbstractVector ? String.(x) : String[]
+
 """
 Refuse an adapter other than `$_CODEX_ACP_PACKAGE`. Discovery and the isolation overrides use its
 `cli` passthrough and `CODEX_CONFIG`; the earlier Zed adapter of the same executable name has
@@ -310,7 +313,7 @@ function _codex_read_config(argv::Vector{String}, cwd::String, env)
             union!(names, String.(keys(get(config, "mcp_servers", Dict()))))
         end
         policy = get(response["config"], "shell_environment_policy", nothing)
-        exclude = policy isa AbstractDict ? String.(get(policy, "exclude", String[])) : String[]
+        exclude = policy isa AbstractDict ? _codex_str_list(get(policy, "exclude", nothing)) : String[]
         (mcp_names = collect(names), shell_exclude = exclude)
     end
     try
@@ -348,10 +351,10 @@ function _codex_acp_setup!(env, b::ACPClientBackend, cwd::String;
     nested = pop!(cfg, "shell_environment_policy", nothing)
     if nested isa AbstractDict   # flattened, so no parent override can replace the dotted list
         for (k, v) in nested
-            k == "exclude" ? append!(exclude, String.(v)) : (cfg["shell_environment_policy.$k"] = v)
+            k == "exclude" ? append!(exclude, _codex_str_list(v)) : (cfg["shell_environment_policy.$k"] = v)
         end
     end
-    append!(exclude, String.(pop!(cfg, "shell_environment_policy.exclude", String[])))
+    append!(exclude, _codex_str_list(pop!(cfg, "shell_environment_policy.exclude", nothing)))
     push!(exclude, "CODEX_CONFIG")
     cfg["shell_environment_policy.exclude"] = unique(exclude)
     inherited = pop!(cfg, "mcp_servers", Dict())

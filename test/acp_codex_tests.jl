@@ -93,6 +93,9 @@ using ReTest, Kaimon, JSON
     @test_throws ErrorException Kaimon._codex_acp_setup!(Dict("CODEX_CONFIG" => "[]"), b, pwd())
     @test_throws ErrorException Kaimon._codex_acp_setup!(copy(original), b, pwd();
         discover = (_, _, _) -> (mcp_names = ["unsafe.name"], shell_exclude = String[]))
+    nullenv = Dict("CODEX_CONFIG" => JSON.json(Dict("shell_environment_policy" => Dict("exclude" => nothing))))
+    Kaimon._codex_acp_setup!(nullenv, b, pwd(); discover = (_, _, _) -> (mcp_names = String[], shell_exclude = String[]))
+    @test JSON.parse(nullenv["CODEX_CONFIG"])["shell_environment_policy.exclude"] == ["CODEX_CONFIG"]
     @test Kaimon._acp_codex(["/some/path/codex-acp.cmd"])
     @test !Kaimon._acp_codex(["claude-agent-acp"])
 end
@@ -104,6 +107,10 @@ if _HAVE_NODE
     found = Kaimon._codex_read_config(argv, pwd(), copy(ENV))
     @test Set(found.mcp_names) == Set(["Kaimon", "kaimon", "project_alias"])
     @test found.shell_exclude == ["FIXTURE_EXCLUDED"]
+    # Real Codex reports an unset list as null.
+    withenv("FIXTURE_NULL_EXCLUDE" => "1") do
+        @test Kaimon._codex_read_config(argv, pwd(), copy(ENV)).shell_exclude == String[]
+    end
     # Anything but the maintained adapter is refused up front, with the install command.
     @test_throws "npm install -g @agentclientprotocol/codex-acp" Kaimon._codex_read_config(
         ["node", "-e", "process.exit(1)", "--"], pwd(), copy(ENV))

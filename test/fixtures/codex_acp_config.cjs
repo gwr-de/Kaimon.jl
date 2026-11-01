@@ -18,7 +18,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
         !process.argv.includes('app-server') || !process.argv.includes('-C') ||
         !process.argv.some(a => a.startsWith('projects={'))) process.exit(2);
     result = {config: {mcp_servers: {Kaimon: {url: 'http://untagged/mcp'}},
-                       shell_environment_policy: {exclude: ['FIXTURE_EXCLUDED']}},
+                       shell_environment_policy: {exclude: process.env.FIXTURE_NULL_EXCLUDE ? null : ['FIXTURE_EXCLUDED']}},
       layers: names.map(name => ({config: {mcp_servers: {[name]: {url: 'http://untagged/mcp'}}}}))};
   } else if (!cli && m.method === 'session/new') {
     result = {sessionId: 'fixture', fixture: {
