@@ -223,6 +223,29 @@ function get_point(collection::String, point_id)
     end
 end
 
+"""
+    point_payload_field(collection, ids, field) -> Dict{String,Any}
+
+The payload `field` of each point among `ids` that exists, keyed by ID (`nothing` where a point lacks
+the field). Empty on any failure, so a caller treats every point as missing.
+"""
+function point_payload_field(collection::String, ids::AbstractVector, field::String)
+    out = Dict{String,Any}()
+    isempty(ids) && return out
+    try
+        body = Dict("ids" => map(_coerce_point_id, ids), "with_payload" => [field], "with_vector" => false)
+        data = JSON.parse(String(_post("/collections/$(collection)/points", body).body))
+        for p in get(data, "result", [])
+            pl = get(p, "payload", nothing)
+            out[string(p["id"])] = pl isa AbstractDict ? get(pl, field, nothing) : nothing
+        end
+    catch e
+        @debug "Point lookup failed" collection = collection exception = e
+        empty!(out)
+    end
+    return out
+end
+
 """Transient connection failures worth retrying for an idempotent request — a stale
 HTTP keepalive connection Qdrant already closed (→ `unexpected EOF` / ECONNRESET) or a
 brief gateway hiccup. Surfaces under sustained upsert load."""

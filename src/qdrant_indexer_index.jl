@@ -90,8 +90,17 @@ function _write_fts!(file_path::String, collection::String, prepared::Vector{Tup
     return length(fts_rows)
 end
 
-"""Embed a file's prepared chunks and upsert them to Qdrant (project + global) under
-their shared deterministic IDs. Returns the number of vectors written."""
+"""
+The prepared chunks that need a vector: those whose point is missing, or was embedded by another
+model. `have` maps the point IDs already stored to the model each was embedded with. A point's ID
+covers its collection, file, span and text, so a stored point with this model is the same vector.
+"""
+_needs_embedding(prepared::Vector{Tuple{Dict,String}}, have::AbstractDict, model::AbstractString) =
+    Tuple{Dict,String}[(c, pid) for (c, pid) in prepared if get(have, pid, nothing) != model]
+
+"""Embed a file's prepared chunks and upsert them to Qdrant under their shared deterministic IDs,
+skipping the ones already stored with this model, so an interrupted index resumes where it stopped.
+Returns the number of vectors written."""
 function _embed_upsert!(
     file_path::String,
     collection::String,
@@ -101,9 +110,10 @@ function _embed_upsert!(
 )
     isempty(prepared) && return 0
     max_length = get_embedding_config(embedding_model).context_chars
+    have = QdrantClient.point_payload_field(collection, [pid for (_, pid) in prepared], "embedding_model")
     points = Dict[]
     n = 0
-    for (chunk, point_id) in prepared
+    for (chunk, point_id) in _needs_embedding(prepared, have, embedding_model)
         text = chunk["text"]
 
         # Chunks are already size-fit by split_to_fit; embed directly. A rare embed
@@ -128,6 +138,7 @@ function _embed_upsert!(
             "project_path" => project_path,
             "collection" => collection,
             "indexed_at" => round(Int, time()),
+            "embedding_model" => embedding_model,
             "kaimon_schema" => 1,  # schema version for future migrations
         )
         for key in ["signature", "parameters", "type_params", "parent_type", "is_mutable", "is_exported"]
